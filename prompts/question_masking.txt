@@ -1,0 +1,18 @@
+### Given a DB schema and a question, mask the table name, column name, and values
+in the question.
+
+Use these placeholder types:
+- [TABLE] for table names
+- [COLUMN] for column names
+- [VALUE] for literal values (numbers, strings, dates, etc.)
+
+### SQLite SQL tables, with their properties:
+{schema_text}
+
+### Question:
+{question}
+
+### Knowledge Evidence:
+{evidence}
+
+### Masked Question:

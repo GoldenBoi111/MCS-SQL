@@ -31,6 +31,7 @@ class TrainingDatasetIndexer:
         self.index_type = index_type
         self.embedding_model: Optional[Any] = None
         self.index: Optional[faiss.Index] = None
+        self.question_store: List[str] = []  # Store questions for retrieval
         self.sql_store: List[str] = []
         self.metadata_store: List[Dict[str, Any]] = []
         self.dimension: int = 0
@@ -194,7 +195,8 @@ class TrainingDatasetIndexer:
         # Add to index
         self.index.add(embeddings)
 
-        # Store SQL and metadata
+        # Store questions, SQL and metadata
+        self.question_store.extend(questions)
         self.sql_store.extend([m["sql"] for m in metadata])
         self.metadata_store.extend(metadata)
 
@@ -224,6 +226,7 @@ class TrainingDatasetIndexer:
             sample_embeddings = np.asarray(sample_embeddings, dtype=np.float32)
             self.index.train(sample_embeddings)
 
+        self.question_store = []
         self.sql_store = []
         self.metadata_store = []
 
@@ -239,6 +242,7 @@ class TrainingDatasetIndexer:
             )
             embeddings = np.asarray(embeddings, dtype=np.float32)
             self.index.add(embeddings)
+            self.question_store.extend(batch_questions)
             self.sql_store.extend([m["sql"] for m in batch_metadata])
             self.metadata_store.extend(batch_metadata)
 
@@ -246,8 +250,17 @@ class TrainingDatasetIndexer:
 
     def search(
         self, query: str, top_k: int = 5
-    ) -> List[Tuple[str, Dict[str, Any], float]]:
-        """Search for similar questions."""
+    ) -> List[Tuple[str, str, Dict[str, Any], float]]:
+        """
+        Search for similar questions.
+
+        Args:
+            query: Search query string
+            top_k: Number of results to return
+
+        Returns:
+            List of (question, SQL, metadata, similarity_score) tuples
+        """
         if self.index is None or self.embedding_model is None:
             raise ValueError("Index not built.")
 
@@ -256,18 +269,36 @@ class TrainingDatasetIndexer:
         )
         query_embedding = np.asarray(query_embedding, dtype=np.float32)
 
-        scores, indices = self.index.search(query_embedding, top_k)
+        print(f"  Debug: Index has {self.index.ntotal} entries")
+        print(f"  Debug: Query embedding shape: {query_embedding.shape}")
+        
+        k = min(top_k, self.index.ntotal)
+        print(f"  Debug: Searching for top {k} results")
+        
+        scores, indices = self.index.search(query_embedding, k)
+        
+        print(f"  Debug: Scores shape: {scores.shape}, Indices shape: {indices.shape}")
+        print(f"  Debug: Scores: {scores}")
+        print(f"  Debug: Indices: {indices}")
 
         results = []
         for score, idx in zip(scores[0], indices[0]):
-            if idx < len(self.sql_store):
-                results.append((self.sql_store[idx], self.metadata_store[idx], float(score)))
+            print(f"  Debug: Checking idx={idx}, score={score}")
+            if idx >= 0 and idx < len(self.question_store):
+                results.append((
+                    self.question_store[idx],
+                    self.sql_store[idx],
+                    self.metadata_store[idx],
+                    float(score)
+                ))
         return results
 
     def save(self, save_path: str):
         """Save index and data to disk."""
         os.makedirs(save_path, exist_ok=True)
         faiss.write_index(self.index, os.path.join(save_path, "faiss_index.bin"))
+        with open(os.path.join(save_path, "question_store.pkl"), "wb") as f:
+            pickle.dump(self.question_store, f)
         with open(os.path.join(save_path, "sql_store.pkl"), "wb") as f:
             pickle.dump(self.sql_store, f)
         with open(os.path.join(save_path, "metadata_store.pkl"), "wb") as f:
@@ -290,38 +321,43 @@ class TrainingDatasetIndexer:
         self.dimension = config["dimension"]
         self.load_model()
         self.index = faiss.read_index(os.path.join(load_path, "faiss_index.bin"))
+        with open(os.path.join(load_path, "question_store.pkl"), "rb") as f:
+            self.question_store = pickle.load(f)
         with open(os.path.join(load_path, "sql_store.pkl"), "rb") as f:
             self.sql_store = pickle.load(f)
         with open(os.path.join(load_path, "metadata_store.pkl"), "rb") as f:
             self.metadata_store = pickle.load(f)
         print(f"Index loaded from: {load_path}")
-        print(f"Total entries: {len(self.sql_store)}")
+        print(f"Total entries: {len(self.question_store)}")
 
 
 def main():
-    """Main function."""
-    indexer = TrainingDatasetIndexer(
-        embedding_model_name="all-MiniLM-L6-v2",
-        index_type="Flat",
-    )
+    """Main function - builds or loads index."""
+    # Default paths
+    dataset_path = r"/project/ss797/at978/MCS-SQL/MCS-SQL/engine/train/train/train.json"
+    index_path = r"/project/ss797/at978/MCS-SQL/MCS-SQL/engine/faiss-index"
+    
+    # Check if index already exists
+    if os.path.exists(index_path):
+        # Load existing index
+        indexer = TrainingDatasetIndexer()
+        print(f"Loading existing index from: {index_path}")
+        indexer.load(index_path)
+        print(f"Index loaded with {len(indexer.question_store)} entries")
+    else:
+        # Build new index
+        indexer = TrainingDatasetIndexer(
+            embedding_model_name="BAAI/bge-base-en-v1.5",
+            index_type="HNSW",
+        )
 
-    dataset_path = r"C:\Repos\MCS-SQL\mini_dev\mini_dev_sqlite.json"
+        print(f"Loading dataset from: {dataset_path}")
+        questions, metadata = indexer.load_dataset(dataset_path)
+        indexer.build_index(questions, metadata, batch_size=1000)
 
-    # For large files, use streaming:
-    # indexer.build_index_streaming(dataset_path, max_entries=100000)
-
-    # For smaller files, load all:
-    questions, metadata = indexer.load_dataset(dataset_path)
-    indexer.build_index(questions, metadata, batch_size=1000)
-
-    indexer.save(r"C:\Repos\MCS-SQL\engine\faiss_index")
-
-    test_query = "What is the ratio of customers who pay in EUR against customers who pay in CZK?"
-    results = indexer.search(test_query, top_k=3)
-
-    print(f"\nSearch results for: {test_query}")
-    for i, (sql, meta, score) in enumerate(results, 1):
-        print(f"\n{i}. Score: {score:.4f}, DB: {meta['db_id']}, SQL: {sql}")
+        print(f"Saving index to: {index_path}")
+        indexer.save(index_path)
+        print("Index built and saved!")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,20 @@
+### Given a database schema, question, and knowledge evidence, generate the correct
+sqlite SQL query for the question.
+### SQLite SQL tables, with their properties:
+{schema_text}
+
+### Question:
+{question}
+
+### Knowledge Evidence:
+{evidence}
+
+You need to not only create the SQL, but also provide the detailed reasoning steps
+required to create the SQL. Your answer should strictly follow the following
+json format:
+{{
+    "reasoning": "", // The reasoning steps for generating SQL.
+    "sql": "", // The final generated SQL.
+}}
+
+### Your Answer:
