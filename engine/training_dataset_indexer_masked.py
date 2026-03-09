@@ -25,6 +25,7 @@ from tqdm import tqdm
 
 from literal_masker import LiteralMasker
 from prompt_manager import PromptManager
+from config import Config
 
 
 class MaskedTrainingDatasetIndexer:
@@ -299,13 +300,25 @@ class MaskedTrainingDatasetIndexer:
 
 def main():
     """Main function - builds or loads masked index."""
-    dataset_path = r"/project/ss797/at978/MCS-SQL/MCS-SQL/engine/train/train/train.json"
-    index_path = r"/project/ss797/at978/MCS-SQL/MCS-SQL/engine/faiss-index-masked"
-    prompts_dir = r"C:\Repos\MCS-SQL\prompts"
+    # Load configuration
+    config = Config()
+    
+    dataset_path = config.TRAIN_DATASET
+    index_path = config.FAISS_INDEX_MASKED
+    prompts_dir = config.PROMPTS_DIR
+
+    print(f"Configuration loaded:")
+    print(f"  Train Dataset: {dataset_path}")
+    print(f"  FAISS Index Path: {index_path}")
+    print(f"  Prompts Directory: {prompts_dir}")
 
     if os.path.exists(index_path):
         # Load existing masked index
-        indexer = MaskedTrainingDatasetIndexer()
+        indexer = MaskedTrainingDatasetIndexer(
+            embedding_model_name=config.EMBEDDING_MODEL_NAME,
+            index_type=config.FAISS_INDEX_TYPE,
+            prompts_dir=prompts_dir,
+        )
         print(f"Loading existing masked index from: {index_path}")
         indexer.load(index_path)
         print(f"Index loaded with {len(indexer.masked_question_store)} entries")
@@ -315,24 +328,27 @@ def main():
 
         print("Initializing transformer model for literal masking...")
         llm_client = TransformersLLMClient(
-            model_name="Qwen/Qwen2.5-7B-Instruct",
-            device="cuda",  # Change to "cpu" if no GPU available
-            max_new_tokens=256,
-            temperature=0.0,  # Use deterministic output for masking
+            model_name=config.LLM_MODEL_NAME,
+            device=config.LLM_DEVICE,
+            max_new_tokens=config.LLM_MAX_NEW_TOKENS,
+            temperature=config.LLM_TEMPERATURE,
         )
 
         # Build new masked index with transformer-based masking
         indexer = MaskedTrainingDatasetIndexer(
-            embedding_model_name="BAAI/bge-base-en-v1.5",
-            index_type="HNSW",
+            embedding_model_name=config.EMBEDDING_MODEL_NAME,
+            index_type=config.FAISS_INDEX_TYPE,
             llm_client=llm_client,
             prompts_dir=prompts_dir,
         )
 
         masked_q, orig_q, masked_sql, orig_sql, metadata = indexer.load_dataset(
-            dataset_path, max_entries=100  # Limit for testing, remove for full dataset
+            dataset_path, max_entries=config.MAX_ENTRIES
         )
-        indexer.build_index(masked_q, orig_q, masked_sql, orig_sql, metadata, batch_size=1000)
+        indexer.build_index(
+            masked_q, orig_q, masked_sql, orig_sql, metadata,
+            batch_size=config.EMBEDDING_BATCH_SIZE
+        )
 
         print(f"Saving masked index to: {index_path}")
         indexer.save(index_path)

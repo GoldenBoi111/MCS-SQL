@@ -164,20 +164,25 @@ class PromptManager:
 
 # Example usage
 if __name__ == "__main__":
-    prompts_dir = r"C:\Repos\MCS-SQL\prompts"
+    from config import Config
+    
+    # Load configuration
+    config = Config()
+    prompts_dir = config.PROMPTS_DIR
+    
     manager = PromptManager(prompts_dir)
-    
+
     print("Available templates:", manager.list_templates())
-    
+
     # Example: Build a question masking prompt
     schema_text = """# customers ( CustomerID: integer, Segment: text, Currency: text )
 # transactions ( TransactionID: integer, Date: date, CustomerID: integer, Amount: real )"""
-    
+
     prompt = manager.build_prompt(
         name="question_masking",
         schema=schema_text,
         question="What is the average amount paid by customers in 2023?",
     )
-    
+
     print("\n=== Built Prompt ===")
     print(prompt)

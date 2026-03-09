@@ -16,6 +16,8 @@ import faiss
 import numpy as np
 from tqdm import tqdm
 
+from config import Config
+
 
 class TrainingDatasetIndexer:
     """
@@ -333,27 +335,32 @@ class TrainingDatasetIndexer:
 
 def main():
     """Main function - builds or loads index."""
-    # Default paths
-    dataset_path = r"/project/ss797/at978/MCS-SQL/MCS-SQL/engine/train/train/train.json"
-    index_path = r"/project/ss797/at978/MCS-SQL/MCS-SQL/engine/faiss-index"
+    # Load configuration
+    config = Config()
     
+    dataset_path = config.TRAIN_DATASET
+    index_path = config.FAISS_INDEX
+
     # Check if index already exists
     if os.path.exists(index_path):
         # Load existing index
-        indexer = TrainingDatasetIndexer()
+        indexer = TrainingDatasetIndexer(
+            embedding_model_name=config.EMBEDDING_MODEL_NAME,
+            index_type=config.FAISS_INDEX_TYPE,
+        )
         print(f"Loading existing index from: {index_path}")
         indexer.load(index_path)
         print(f"Index loaded with {len(indexer.question_store)} entries")
     else:
         # Build new index
         indexer = TrainingDatasetIndexer(
-            embedding_model_name="BAAI/bge-base-en-v1.5",
-            index_type="HNSW",
+            embedding_model_name=config.EMBEDDING_MODEL_NAME,
+            index_type=config.FAISS_INDEX_TYPE,
         )
 
         print(f"Loading dataset from: {dataset_path}")
         questions, metadata = indexer.load_dataset(dataset_path)
-        indexer.build_index(questions, metadata, batch_size=1000)
+        indexer.build_index(questions, metadata, batch_size=config.EMBEDDING_BATCH_SIZE)
 
         print(f"Saving index to: {index_path}")
         indexer.save(index_path)

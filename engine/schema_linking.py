@@ -539,20 +539,30 @@ Your answer should strictly follow the following json format.
 
 # Example usage
 if __name__ == "__main__":
+    from config import Config
+    
+    # Load configuration
+    config = Config()
+    
     # Initialize Qwen LLM client using Transformers
     # Using Qwen2.5-7B-Instruct (closest publicly available to Qwen 3.5 8B)
     llm_client = TransformersLLMClient(
-        model_name="Qwen/Qwen2.5-7B-Instruct",
-        device="cuda",  # Change to "cpu" if no GPU available
-        max_new_tokens=512,
-        temperature=0.7,
+        model_name=config.LLM_MODEL_NAME,
+        device=config.LLM_DEVICE,
+        max_new_tokens=config.LLM_MAX_NEW_TOKENS,
+        temperature=config.LLM_TEMPERATURE,
     )
 
     # Create schema linker with LLM client
-    linker = SchemaLinker(pt=3, pc=3, n=1, llm_client=llm_client)
+    linker = SchemaLinker(
+        pt=config.TABLE_LINKING_ITERATIONS,
+        pc=config.COLUMN_LINKING_ITERATIONS,
+        n=config.MAJORITY_VOTE_N,
+        llm_client=llm_client,
+    )
 
     # Load schema from database
-    db_path = r"C:\Repos\MCS-SQL\mini_dev\minidev\minidev\dev_databases\california_schools\california_schools.sqlite"
+    db_path = config.get_database_path()
     schema = linker.load_schema(db_path)
 
     # Use a question relevant to the california_schools database
