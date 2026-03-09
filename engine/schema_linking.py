@@ -22,7 +22,81 @@ class SchemaLinkingResult:
     tables: List[str]
     columns: List[str]
     reasoning: str
-    confidence: float
+
+
+class TransformersLLMClient:
+    """LLM client using Hugging Face Transformers for Qwen models."""
+
+    def __init__(
+        self,
+        model_name: str = "Qwen/Qwen2.5-7B-Instruct",
+        device: str = "cuda",
+        max_new_tokens: int = 512,
+        temperature: float = 0.7,
+    ):
+        """
+        Initialize the Transformers LLM client.
+
+        Args:
+            model_name: Hugging Face model name
+            device: Device to run model on ('cuda' or 'cpu')
+            max_new_tokens: Maximum tokens to generate
+            temperature: Sampling temperature
+        """
+        try:
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            import torch
+        except ImportError:
+            raise ImportError(
+                "Please install transformers and torch: pip install transformers torch"
+            )
+
+        self.model_name = model_name
+        self.device = device
+        self.max_new_tokens = max_new_tokens
+        self.temperature = temperature
+
+        print(f"Loading model: {model_name}...")
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            device_map="auto" if device == "cuda" else None,
+        )
+        if device == "cuda":
+            self.model = self.model.to(device)
+        print(f"Model loaded successfully on {device}")
+
+    def generate(self, prompt: str) -> str:
+        """
+        Generate response from the model.
+
+        Args:
+            prompt: Input prompt string
+
+        Returns:
+            Generated response string
+        """
+        import torch
+
+        inputs = self.tokenizer(prompt, return_tensors="pt")
+        if self.device == "cuda":
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=self.max_new_tokens,
+                temperature=self.temperature,
+                do_sample=self.temperature > 0,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )
+
+        response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        # Remove the prompt from the response
+        response = response[len(prompt) :]
+        return response.strip()
 
 
 class SchemaLinker:
@@ -34,6 +108,7 @@ class SchemaLinker:
         pc: Number of times to shuffle and call LLM for column linking
         n: Number of outputs to generate for majority voting
         llm_client: Client for making LLM API calls
+        _current_schema: Current schema for mock LLM responses
     """
 
     def __init__(
@@ -52,6 +127,7 @@ class SchemaLinker:
         self.pc = pc
         self.n = n
         self.llm_client = llm_client
+        self._current_schema: Optional[Dict[str, List[str]]] = None
 
     def load_schema(self, db_path: str) -> Dict[str, List[str]]:
         """
@@ -72,8 +148,9 @@ class SchemaLinker:
         cursor.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         )
-        tables = [row[0] for row in cursor.fetchall()]
 
+        tables = [row[0] for row in cursor.fetchall()]
+        print(tables)
         schema = {}
         for table in tables:
             cursor.execute(f"PRAGMA table_info({table})")
@@ -274,7 +351,10 @@ Your answer should strictly follow the following json format.
 
         for result in results:
             items = result.get(key, [])
-            all_reasoning.append(result.get("reasoning", ""))
+            reasoning = result.get("reasoning", "")
+            # Only add non-empty, non-duplicate reasoning
+            if reasoning and reasoning not in all_reasoning:
+                all_reasoning.append(reasoning)
 
             for item in items:
                 if item not in seen:
@@ -300,6 +380,7 @@ Your answer should strictly follow the following json format.
             Tuple of (selected tables, reasoning)
         """
         results = []
+        self._current_schema = schema
 
         for i in range(self.pt):
             # Shuffle schema order for diversity
@@ -315,7 +396,7 @@ Your answer should strictly follow the following json format.
                     response = self.llm_client.generate(prompt)
                 else:
                     # Placeholder for testing - replace with actual LLM call
-                    response = self._mock_llm_call(prompt, "table")
+                    response = self._mock_llm_call(prompt, "table", schema)
 
                 parsed = self.parse_llm_response(response, "table")
                 results.append(parsed)
@@ -364,7 +445,7 @@ Your answer should strictly follow the following json format.
                     response = self.llm_client.generate(prompt)
                 else:
                     # Placeholder for testing - replace with actual LLM call
-                    response = self._mock_llm_call(prompt, "column")
+                    response = self._mock_llm_call(prompt, "column", schema)
 
                 parsed = self.parse_llm_response(response, "column")
                 results.append(parsed)
@@ -398,26 +479,52 @@ Your answer should strictly follow the following json format.
 
         # Calculate confidence based on agreement rate
         total_items = len(tables) + len(columns)
-        confidence = 1.0 if total_items > 0 else 0.0
 
         return SchemaLinkingResult(
             tables=tables,
             columns=columns,
             reasoning=f"Table Selection:\n{table_reasoning}\n\nColumn Selection:\n{column_reasoning}",
-            confidence=confidence,
         )
 
-    def _mock_llm_call(self, prompt: str, task_type: str) -> str:
+    def _mock_llm_call(
+        self, prompt: str, task_type: str, schema: Optional[Dict[str, List[str]]] = None
+    ) -> str:
         """
         Mock LLM call for testing purposes.
+        Returns schema-aware mock responses based on the actual database schema.
 
         Args:
             prompt: Input prompt
             task_type: Either 'table' or 'column'
+            schema: Optional schema dictionary for context-aware responses
 
         Returns:
             Mock response string
         """
+        if schema:
+            tables = list(schema.keys())
+            # Build mock response based on actual schema
+            if task_type == "table":
+                # Select first 1-2 tables as mock response
+                selected = tables[: min(2, len(tables))]
+                return f"""{{
+    "reasoning": "Based on the question and available tables ({', '.join(tables)}), the selected tables contain relevant data.",
+    "tables": {json.dumps(selected)}
+}}"""
+            else:
+                # Select columns from the first table
+                if tables:
+                    first_table = tables[0]
+                    columns = schema.get(first_table, [])
+                    selected_columns = [
+                        f"{first_table}.{col}" for col in columns[: min(3, len(columns))]
+                    ]
+                    return f"""{{
+    "reasoning": "Selected columns from {first_table} table for the query.",
+    "columns": {json.dumps(selected_columns)}
+}}"""
+
+        # Fallback for when no schema is provided
         if task_type == "table":
             return """{
     "reasoning": "Based on the question, we need to analyze customer data and payment information.",
@@ -432,25 +539,29 @@ Your answer should strictly follow the following json format.
 
 # Example usage
 if __name__ == "__main__":
-    # Example: Using with mini_dev database
-    linker = SchemaLinker(pt=3, pc=3, n=1)
+    # Initialize Qwen LLM client using Transformers
+    # Using Qwen2.5-7B-Instruct (closest publicly available to Qwen 3.5 8B)
+    llm_client = TransformersLLMClient(
+        model_name="Qwen/Qwen2.5-7B-Instruct",
+        device="cuda",  # Change to "cpu" if no GPU available
+        max_new_tokens=512,
+        temperature=0.7,
+    )
+
+    # Create schema linker with LLM client
+    linker = SchemaLinker(pt=3, pc=3, n=1, llm_client=llm_client)
 
     # Load schema from database
-    # db_path = "../mini_dev/mini_dev_sqlite.json"  # Adjust path as needed
-    # schema = linker.load_schema(db_path)
+    db_path = r"C:\Repos\MCS-SQL\mini_dev\minidev\minidev\dev_databases\california_schools\california_schools.sqlite"
+    schema = linker.load_schema(db_path)
 
-    # For demonstration, use a sample schema
-    sample_schema = {
-        "customers": ["customer_id", "name", "currency", "email"],
-        "payments": ["payment_id", "customer_id", "amount", "date"],
-        "transactions": ["transaction_id", "customer_id", "type", "value"],
-    }
-
-    question = "What is the ratio of customers who pay in EUR against customers who pay in CZK?"
-    evidence = "ratio of customers who pay in EUR against customers who pay in CZK = count(Currency = 'EUR') / count(Currency = 'CZK')."
+    # Use a question relevant to the california_schools database
+    question = "What is the average SAT score of schools in Los Angeles county?"
+    evidence = "Average SAT score is calculated by taking the mean of all SAT scores."
 
     # Perform schema linking
-    result = linker.link_schema(sample_schema, question, evidence)
+    result = linker.link_schema(schema, question, evidence)
+    print(result)
 
     print("Selected Tables:", result.tables)
     print("Selected Columns:", result.columns)
