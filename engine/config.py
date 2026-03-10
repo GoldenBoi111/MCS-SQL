@@ -49,18 +49,16 @@ class Config:
 
         # Base paths
         self.PROJECT_ROOT = self._get_path("PROJECT_ROOT", Path(__file__).parent.parent)
-        self.DATA_BASE = self._get_path("DATA_BASE", self.PROJECT_ROOT / "data")
 
         # Dataset paths
-        self.TRAIN_DATASET = self._get_path("TRAIN_DATASET", self.DATA_BASE / "train" / "train" / "train.json")
-        self.DEV_DATABASES = self._get_path("DEV_DATABASES", self.DATA_BASE / "dev_databases")
+        self.TRAIN_DATASET = self._get_path("TRAIN_DATASET", self.PROJECT_ROOT / "train" / "train" / "train.json")
+        self.DEV_DATABASES = self._get_path("DEV_DATABASES", self.PROJECT_ROOT / "minidev")
 
         # FAISS index paths
-        self.FAISS_INDEX = self._get_path("FAISS_INDEX", self.DATA_BASE / "faiss-index")
-        self.FAISS_INDEX_MASKED = self._get_path("FAISS_INDEX_MASKED", self.DATA_BASE / "faiss-index-masked")
+        self.FAISS_INDEX = self._get_path("FAISS_INDEX", self.PROJECT_ROOT / "faiss-index")
+        self.FAISS_INDEX_MASKED = self._get_path("FAISS_INDEX_MASKED", self.PROJECT_ROOT / "faiss-index-masked")
 
-        # Model paths
-        self.MODELS_DIR = self._get_path("MODELS_DIR", self.DATA_BASE / "models")
+        # Model configuration
         self.EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-base-en-v1.5")
         self.LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
 
@@ -128,12 +126,8 @@ class Config:
 
     def _ensure_directories(self):
         """Create necessary directories if they don't exist."""
-        directories = [
-            self.DATA_BASE,
-            self.MODELS_DIR,
-        ]
-        for directory in directories:
-            directory.mkdir(parents=True, exist_ok=True)
+        # No auto-creation needed - all directories are at PROJECT_ROOT level
+        pass
 
     def get_database_path(self, db_name: Optional[str] = None) -> Path:
         """
@@ -154,12 +148,10 @@ class Config:
         """Return configuration as a dictionary."""
         return {
             "PROJECT_ROOT": str(self.PROJECT_ROOT),
-            "DATA_BASE": str(self.DATA_BASE),
             "TRAIN_DATASET": str(self.TRAIN_DATASET),
             "DEV_DATABASES": str(self.DEV_DATABASES),
             "FAISS_INDEX": str(self.FAISS_INDEX),
             "FAISS_INDEX_MASKED": str(self.FAISS_INDEX_MASKED),
-            "MODELS_DIR": str(self.MODELS_DIR),
             "EMBEDDING_MODEL_NAME": self.EMBEDDING_MODEL_NAME,
             "LLM_MODEL_NAME": self.LLM_MODEL_NAME,
             "PROMPTS_DIR": str(self.PROMPTS_DIR),

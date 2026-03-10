@@ -50,11 +50,7 @@ htmlcov/
 # Logs
 *.log
 
-# Data and models
-data/
-models/
-
-# FAISS indices
+# FAISS indices (generated)
 faiss-index*/
 
 # Model checkpoints
