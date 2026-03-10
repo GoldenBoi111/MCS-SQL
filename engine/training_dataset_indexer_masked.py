@@ -131,27 +131,35 @@ class MaskedTrainingDatasetIndexer:
         try:
             conn = sqlite3.connect(str(db_path))
             cursor = conn.cursor()
+            
+            # Get all tables (including those with special names)
             cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                'SELECT name FROM sqlite_master WHERE type="table" AND name NOT LIKE "sqlite_%"'
             )
             tables = [row[0] for row in cursor.fetchall()]
             
             schema_lines = []
             for table in tables:
-                cursor.execute(f"PRAGMA table_info({table})")
-                columns = cursor.fetchall()
-                
-                # Format: table ( col1: type, col2: type, ... )
-                col_defs = []
-                for col in columns:
-                    col_name = col[1]
-                    col_type = col[2] if col[2] else 'text'
-                    col_defs.append(f"{col_name}: {col_type}")
-                
-                schema_lines.append(f"# {table} ( {', '.join(col_defs)} )")
+                # Escape table names with special characters using brackets
+                # This handles: reserved words, dashes, spaces, etc.
+                try:
+                    cursor.execute(f'PRAGMA table_info("[{table}]")')
+                    columns = cursor.fetchall()
+                    
+                    # Format: table ( col1: type, col2: type, ... )
+                    col_defs = []
+                    for col in columns:
+                        col_name = col[1]
+                        col_type = col[2] if col[2] else 'text'
+                        col_defs.append(f"{col_name}: {col_type}")
+                    
+                    schema_lines.append(f"# {table} ( {', '.join(col_defs)} )")
+                except Exception as col_err:
+                    print(f"  Warning: Could not get columns for {table} in {db_id}: {col_err}")
+                    continue
             
             conn.close()
-            schema_text = "\n\n".join(schema_lines)
+            schema_text = "\n\n".join(schema_lines) if schema_lines else "# No tables found"
             
             # Cache in memory
             self.schema_cache[db_id] = schema_text
