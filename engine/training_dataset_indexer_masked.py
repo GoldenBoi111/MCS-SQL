@@ -22,6 +22,7 @@ Note: This is slower than regex-based masking but provides better generalization
 import json
 import os
 import pickle
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Generator
 import faiss
 import numpy as np
@@ -88,6 +89,7 @@ class MaskedTrainingDatasetIndexer:
     def _get_schema_for_db(self, db_id: str) -> Optional[str]:
         """
         Load and format schema for a given database with column types.
+        Uses JSON cache to avoid reloading schemas on subsequent runs.
         
         Args:
             db_id: Database identifier
@@ -95,13 +97,27 @@ class MaskedTrainingDatasetIndexer:
         Returns:
             Formatted schema string with column types or None if not found
         """
+        # Check in-memory cache first
         if db_id in self.schema_cache:
             return self.schema_cache[db_id]
         
+        # Try to load from JSON cache file
+        cache_file = Path(self.databases_path) / "schema_cache.json" if self.databases_path else None
+        if cache_file and cache_file.exists():
+            try:
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    all_schemas = json.load(f)
+                    if db_id in all_schemas:
+                        schema_text = all_schemas[db_id]
+                        self.schema_cache[db_id] = schema_text  # Also cache in memory
+                        return schema_text
+            except Exception as e:
+                print(f"  Warning: Could not read schema cache: {e}")
+        
+        # Not in cache - load from database and save it
         if not self.databases_path:
             return None
         
-        # Try to find the database directory
         from pathlib import Path
         import sqlite3
         
@@ -137,11 +153,96 @@ class MaskedTrainingDatasetIndexer:
             
             conn.close()
             schema_text = "\n\n".join(schema_lines)
+            
+            # Cache in memory
             self.schema_cache[db_id] = schema_text
+            
+            # Save to JSON cache file
+            if cache_file:
+                self._save_schema_to_cache(db_id, schema_text, cache_file)
+            
             return schema_text
         except Exception as e:
             print(f"  Warning: Could not load schema for {db_id}: {e}")
             return None
+    
+    def preload_schemas(self, db_ids: List[str]):
+        """
+        Preload schemas for all unique database IDs.
+        Checks cache first, only loads missing schemas from databases.
+        
+        Args:
+            db_ids: List of unique database IDs to preload
+        """
+        if not self.databases_path:
+            return
+        
+        cache_file = Path(self.databases_path) / "schema_cache.json"
+        
+        # Load existing cache
+        all_schemas = {}
+        if cache_file.exists():
+            try:
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    all_schemas = json.load(f)
+                    print(f"Loaded {len(all_schemas)} schemas from cache")
+            except Exception as e:
+                print(f"  Warning: Could not read schema cache: {e}")
+        
+        # Find which schemas are missing
+        missing_schemas = []
+        for db_id in db_ids:
+            if db_id in all_schemas:
+                self.schema_cache[db_id] = all_schemas[db_id]
+            else:
+                missing_schemas.append(db_id)
+        
+        # Load missing schemas
+        if missing_schemas:
+            print(f"Loading {len(missing_schemas)} missing schemas from databases...")
+            for db_id in tqdm(missing_schemas, desc="Loading schemas"):
+                schema = self._get_schema_for_db(db_id)
+                if schema:
+                    all_schemas[db_id] = schema
+            
+            # Save complete cache
+            if cache_file and all_schemas:
+                try:
+                    with open(cache_file, 'w', encoding='utf-8') as f:
+                        json.dump(all_schemas, f, indent=2, ensure_ascii=False)
+                    print(f"Saved {len(all_schemas)} schemas to cache: {cache_file}")
+                except Exception as e:
+                    print(f"  Warning: Could not save schema cache: {e}")
+        else:
+            print("All schemas found in cache!")
+    
+    def _save_schema_to_cache(self, db_id: str, schema_text: str, cache_file: Path):
+        """
+        Save a schema to the JSON cache file.
+        
+        Args:
+            db_id: Database identifier
+            schema_text: Formatted schema string
+            cache_file: Path to cache JSON file
+        """
+        # Load existing cache
+        all_schemas = {}
+        if cache_file.exists():
+            try:
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    all_schemas = json.load(f)
+            except Exception:
+                all_schemas = {}
+        
+        # Add new schema
+        all_schemas[db_id] = schema_text
+        
+        # Save back to file
+        try:
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(all_schemas, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"  Warning: Could not save schema cache: {e}")
 
     def load_model(self):
         """Load the embedding model."""
@@ -174,6 +275,7 @@ class MaskedTrainingDatasetIndexer:
     ) -> Tuple[List[str], List[str], List[str], List[str], List[Dict[str, Any]]]:
         """
         Load dataset and mask questions/SQL.
+        Preloads all schemas from cache, only loading missing ones from databases.
 
         Args:
             dataset_path: Path to JSON array file
@@ -192,6 +294,25 @@ class MaskedTrainingDatasetIndexer:
         file_size_gb = os.path.getsize(dataset_path) / (1024**3)
         print(f"File size: {file_size_gb:.2f} GB")
 
+        # First pass: collect all unique db_ids
+        print("\nScanning dataset for unique databases...")
+        unique_db_ids = set()
+        with open(dataset_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                for entry in data[:max_entries]:
+                    if "db_id" in entry:
+                        unique_db_ids.add(entry["db_id"])
+        
+        print(f"Found {len(unique_db_ids)} unique databases: {', '.join(sorted(unique_db_ids)[:10])}{'...' if len(unique_db_ids) > 10 else ''}")
+        
+        # Preload all schemas (checks cache first, loads missing)
+        if self.use_llm_masking and self.databases_path:
+            print("\nPreloading schemas...")
+            self.preload_schemas(list(unique_db_ids))
+        
+        # Second pass: load and mask
+        print("\nLoading and masking entries...")
         with open(dataset_path, "r", encoding="utf-8") as f:
             data = json.load(f)
             if isinstance(data, list):
@@ -201,18 +322,18 @@ class MaskedTrainingDatasetIndexer:
                         orig_sql = entry["SQL"]
                         db_id = entry.get("db_id", "")
                         evidence = entry.get("evidence", "")
-                        
-                        # Get schema for this database (for LLM masking)
+
+                        # Get schema for this database (from cache or load)
                         schema = None
                         if self.use_llm_masking and self.databases_path:
                             schema = self._get_schema_for_db(db_id)
-                        
+
                         # Mask question using LLM (with schema) or regex (without)
                         masked_question = self.literal_masker.mask_question(
                             orig_question, schema=schema, evidence=evidence
                         )
                         masked_sql = self.literal_masker.mask_sql(orig_sql)
-                        
+
                         masked_questions.append(masked_question)
                         original_questions.append(orig_question)
                         masked_sqls.append(masked_sql)
@@ -421,7 +542,8 @@ def main():
         # Build new masked index with LLM-based masking
         print("\nBuilding masked index with LLM-based masking...")
         print("Note: This will take time as each question is processed by the LLM.")
-        print("      Schema will be loaded for each database to enable table/column masking.")
+        print("      Schema will be loaded for each database and cached in schema_cache.json")
+        print("      Subsequent runs will be faster as schemas are cached.")
         
         indexer = MaskedTrainingDatasetIndexer(
             embedding_model_name=config.EMBEDDING_MODEL_NAME,
