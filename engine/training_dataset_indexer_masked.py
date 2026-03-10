@@ -611,7 +611,7 @@ def main():
     databases_path = config.DEV_DATABASES
     
     # Checkpoint configuration
-    checkpoint_path = index_path + ".checkpoint"  # Save checkpoint next to index
+    checkpoint_path = str(index_path) + ".checkpoint"  # Save checkpoint next to index
     checkpoint_every = 500  # Save every 500 entries
 
     print(f"Configuration loaded:")
