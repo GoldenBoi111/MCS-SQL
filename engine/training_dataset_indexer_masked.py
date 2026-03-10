@@ -243,9 +243,92 @@ class MaskedTrainingDatasetIndexer:
         except Exception as e:
             print(f"  Warning: Could not save schema cache: {e}")
 
-    def load_model(self):
-        """Load the embedding model."""
-        from sentence_transformers import SentenceTransformer
+    def save_checkpoint(self, checkpoint_path: str, processed_count: int, start_index: int = 0):
+        """
+        Save a checkpoint that can be resumed later.
+        
+        Args:
+            checkpoint_path: Directory to save checkpoint
+            processed_count: Number of entries processed so far
+            start_index: Index in dataset where processing stopped
+        """
+        os.makedirs(checkpoint_path, exist_ok=True)
+        
+        # Save partial data
+        with open(os.path.join(checkpoint_path, "masked_questions.pkl"), "wb") as f:
+            pickle.dump(self.masked_question_store, f)
+        with open(os.path.join(checkpoint_path, "original_questions.pkl"), "rb") as f:
+            pickle.dump(self.original_question_store, f)
+        with open(os.path.join(checkpoint_path, "masked_sqls.pkl"), "wb") as f:
+            pickle.dump(self.masked_sql_store, f)
+        with open(os.path.join(checkpoint_path, "original_sqls.pkl"), "wb") as f:
+            pickle.dump(self.original_sql_store, f)
+        with open(os.path.join(checkpoint_path, "metadata.pkl"), "wb") as f:
+            pickle.dump(self.metadata_store, f)
+        
+        # Save progress
+        checkpoint_data = {
+            "processed_count": processed_count,
+            "start_index": start_index,  # Where to resume from
+            "embedding_model_name": self.embedding_model_name,
+            "index_type": self.index_type,
+        }
+        with open(os.path.join(checkpoint_path, "checkpoint.json"), "w") as f:
+            json.dump(checkpoint_data, f, indent=2)
+        
+        print(f"  Checkpoint saved: {processed_count} entries processed (index {start_index})")
+    
+    @classmethod
+    def load_checkpoint(cls, checkpoint_path: str, config: Config) -> Optional[Tuple["MaskedTrainingDatasetIndexer", int, int, List, List, List, List, List]]:
+        """
+        Load a checkpoint to resume processing.
+        
+        Args:
+            checkpoint_path: Directory containing checkpoint files
+            config: Configuration object
+            
+        Returns:
+            Tuple of (indexer, processed_count, resume_index, masked_q, orig_q, masked_sql, orig_sql, metadata)
+            or None if no checkpoint exists
+        """
+        if not os.path.exists(checkpoint_path):
+            return None
+        
+        checkpoint_file = os.path.join(checkpoint_path, "checkpoint.json")
+        if not os.path.exists(checkpoint_file):
+            return None
+        
+        try:
+            with open(checkpoint_file, "r") as f:
+                checkpoint_data = json.load(f)
+            
+            processed_count = checkpoint_data.get("processed_count", 0)
+            resume_index = checkpoint_data.get("start_index", processed_count)
+            
+            # Create indexer
+            indexer = cls(
+                embedding_model_name=checkpoint_data.get("embedding_model_name", config.EMBEDDING_MODEL_NAME),
+                index_type=checkpoint_data.get("index_type", config.FAISS_INDEX_TYPE),
+            )
+            
+            # Load partial data
+            with open(os.path.join(checkpoint_path, "masked_questions.pkl"), "rb") as f:
+                masked_q = pickle.load(f)
+            with open(os.path.join(checkpoint_path, "original_questions.pkl"), "rb") as f:
+                orig_q = pickle.load(f)
+            with open(os.path.join(checkpoint_path, "masked_sqls.pkl"), "rb") as f:
+                masked_sql = pickle.load(f)
+            with open(os.path.join(checkpoint_path, "original_sqls.pkl"), "rb") as f:
+                orig_sql = pickle.load(f)
+            with open(os.path.join(checkpoint_path, "metadata.pkl"), "rb") as f:
+                metadata = pickle.load(f)
+            
+            print(f"Checkpoint loaded: {processed_count} entries already processed")
+            print(f"Resume index: {resume_index}")
+            return (indexer, processed_count, resume_index, masked_q, orig_q, masked_sql, orig_sql, metadata)
+        except Exception as e:
+            print(f"  Warning: Could not load checkpoint: {e}")
+            return None
 
         print(f"Loading embedding model: {self.embedding_model_name}...")
         self.embedding_model = SentenceTransformer(self.embedding_model_name)
@@ -271,14 +354,21 @@ class MaskedTrainingDatasetIndexer:
         self,
         dataset_path: str,
         max_entries: Optional[int] = None,
+        checkpoint_path: Optional[str] = None,
+        checkpoint_every: int = 500,
+        resume_index: int = 0,
     ) -> Tuple[List[str], List[str], List[str], List[str], List[Dict[str, Any]]]:
         """
         Load dataset and mask questions/SQL.
         Preloads all schemas from cache, only loading missing ones from databases.
+        Supports checkpointing for resumable processing.
 
         Args:
             dataset_path: Path to JSON array file
             max_entries: Maximum entries to load
+            checkpoint_path: Optional directory to save/load checkpoints
+            checkpoint_every: Save checkpoint every N entries
+            resume_index: Index to start from (for resuming)
 
         Returns:
             Tuple of (masked_questions, original_questions, masked_sqls, original_sqls, metadata)
@@ -311,11 +401,15 @@ class MaskedTrainingDatasetIndexer:
             self.preload_schemas(list(unique_db_ids))
         
         # Second pass: load and mask
-        print("\nLoading and masking entries...")
+        print(f"\nLoading and masking entries (starting from index {resume_index})...")
         with open(dataset_path, "r", encoding="utf-8") as f:
             data = json.load(f)
             if isinstance(data, list):
-                for entry in tqdm(data[:max_entries], desc="Loading & Masking"):
+                # Skip already processed entries
+                for idx, entry in tqdm(enumerate(data[:max_entries]), total=len(data[:max_entries]), initial=resume_index, desc="Loading & Masking"):
+                    if idx < resume_index:
+                        continue  # Skip already processed
+                    
                     if "question" in entry and "SQL" in entry:
                         orig_question = entry["question"]
                         orig_sql = entry["SQL"]
@@ -344,6 +438,10 @@ class MaskedTrainingDatasetIndexer:
                             "masked_sql": masked_sql,
                             "difficulty": entry.get("difficulty", "unknown"),
                         })
+                        
+                        # Save checkpoint periodically
+                        if checkpoint_path and len(masked_questions) % checkpoint_every == 0:
+                            self.save_checkpoint(checkpoint_path, len(masked_questions) + resume_index, idx + 1)
 
         print(f"Extracted and masked {len(masked_questions)} question-SQL pairs")
         return masked_questions, original_questions, masked_sqls, original_sqls, metadata
@@ -503,7 +601,7 @@ class MaskedTrainingDatasetIndexer:
 
 
 def main():
-    """Main function - builds or loads masked index."""
+    """Main function - builds or loads masked index with checkpoint support."""
     # Load configuration
     config = Config()
 
@@ -511,25 +609,34 @@ def main():
     index_path = config.FAISS_INDEX_MASKED
     prompts_dir = config.PROMPTS_DIR
     databases_path = config.DEV_DATABASES
+    
+    # Checkpoint configuration
+    checkpoint_path = index_path + ".checkpoint"  # Save checkpoint next to index
+    checkpoint_every = 500  # Save every 500 entries
 
     print(f"Configuration loaded:")
     print(f"  Train Dataset: {dataset_path}")
     print(f"  FAISS Index Path: {index_path}")
     print(f"  Prompts Directory: {prompts_dir}")
     print(f"  Databases Path: {databases_path}")
+    print(f"  Checkpoint Path: {checkpoint_path}")
+    print(f"  Checkpoint Interval: Every {checkpoint_every} entries")
 
-    if os.path.exists(index_path):
-        # Load existing masked index
-        indexer = MaskedTrainingDatasetIndexer(
-            embedding_model_name=config.EMBEDDING_MODEL_NAME,
-            index_type=config.FAISS_INDEX_TYPE,
-            prompts_dir=prompts_dir,
-        )
-        print(f"Loading existing masked index from: {index_path}")
-        indexer.load(index_path)
-        print(f"Index loaded with {len(indexer.masked_question_store)} entries")
+    # Try to load existing checkpoint
+    checkpoint_data = MaskedTrainingDatasetIndexer.load_checkpoint(checkpoint_path, config)
+    
+    if checkpoint_data:
+        # Resume from checkpoint
+        indexer, processed_count, resume_index, masked_q, orig_q, masked_sql, orig_sql, metadata = checkpoint_data
+        
+        print(f"\n{'='*60}")
+        print(f"RESUMING FROM CHECKPOINT")
+        print(f"{'='*60}")
+        print(f"Already processed: {processed_count} entries")
+        print(f"Resuming from index: {resume_index}")
+        print(f"Loading remaining entries and continuing...\n")
     else:
-        # Initialize Qwen LLM client for masking
+        # Initialize LLM client for masking
         print("\nInitializing LLM client for masking...")
         llm_client = TransformersLLMClient(
             model_name=config.LLM_MODEL_NAME,
@@ -543,6 +650,7 @@ def main():
         print("Note: This will take time as each question is processed by the LLM.")
         print("      Schema will be loaded for each database and cached in schema_cache.json")
         print("      Subsequent runs will be faster as schemas are cached.")
+        print("      Checkpoints will be saved every 500 entries for resumability.")
         
         indexer = MaskedTrainingDatasetIndexer(
             embedding_model_name=config.EMBEDDING_MODEL_NAME,
@@ -554,20 +662,42 @@ def main():
         )
 
         # Limit entries for testing (remove max_entries for full dataset)
-        max_entries = config.MAX_ENTRIES if config.MAX_ENTRIES else 100
-        print(f"Processing {max_entries} entries...")
+        max_entries = config.MAX_ENTRIES if config.MAX_ENTRIES else None
+        resume_index = 0
+        
+        if max_entries:
+            print(f"Processing {max_entries} entries...")
+        else:
+            print(f"Processing ALL entries...")
         
         masked_q, orig_q, masked_sql, orig_sql, metadata = indexer.load_dataset(
-            dataset_path, max_entries=max_entries
+            dataset_path, 
+            max_entries=max_entries,
+            checkpoint_path=checkpoint_path,
+            checkpoint_every=checkpoint_every,
+            resume_index=resume_index,
         )
-        indexer.build_index(
-            masked_q, orig_q, masked_sql, orig_sql, metadata,
-            batch_size=config.EMBEDDING_BATCH_SIZE
-        )
+    
+    # Build index
+    indexer.build_index(
+        masked_q, orig_q, masked_sql, orig_sql, metadata,
+        batch_size=config.EMBEDDING_BATCH_SIZE
+    )
 
-        print(f"\nSaving masked index to: {index_path}")
-        indexer.save(index_path)
-        print("Masked index built and saved!")
+    # Save final index
+    print(f"\nSaving masked index to: {index_path}")
+    indexer.save(index_path)
+    
+    # Clean up checkpoint after successful save
+    import shutil
+    if os.path.exists(checkpoint_path):
+        try:
+            shutil.rmtree(checkpoint_path)
+            print(f"Checkpoint cleaned up: {checkpoint_path}")
+        except Exception as e:
+            print(f"  Warning: Could not clean up checkpoint: {e}")
+    
+    print("Masked index built and saved!")
 
 
 if __name__ == "__main__":
