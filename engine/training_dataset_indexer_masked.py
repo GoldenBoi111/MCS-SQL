@@ -118,7 +118,6 @@ class MaskedTrainingDatasetIndexer:
         if not self.databases_path:
             return None
         
-        from pathlib import Path
         import sqlite3
         
         db_dir = Path(self.databases_path) / db_id
