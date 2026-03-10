@@ -11,8 +11,12 @@ Example:
   Original: "What is the ratio of customers who pay in EUR against CZK?"
   Masked:   "What is the ratio of customers who pay in [CURRENCY] against [CURRENCY]?"
 
-This version uses a transformer-based LLM (Qwen) to identify and replace
-literals instead of regex-based masking, providing better semantic understanding.
+This version uses LLM-based masking (Qwen) to identify and replace:
+- Table names → [TABLE]
+- Column names → [COLUMN]  
+- Literal values → [VALUE]
+
+Note: This is slower than regex-based masking but provides better generalization.
 """
 
 import json
@@ -26,11 +30,13 @@ from tqdm import tqdm
 from literal_masker import LiteralMasker
 from prompt_manager import PromptManager
 from config import Config
+from schema_linking import TransformersLLMClient
 
 
 class MaskedTrainingDatasetIndexer:
     """
     Indexer for training dataset using masked questions for better generalization.
+    Uses LLM-based masking to identify table names, column names, and values.
     """
 
     def __init__(
@@ -38,7 +44,9 @@ class MaskedTrainingDatasetIndexer:
         embedding_model_name: str = "BAAI/bge-base-en-v1.5",
         index_type: str = "HNSW",
         llm_client: Optional[Any] = None,
-        prompts_dir: str = None,
+        prompts_dir: Optional[str] = None,
+        databases_path: Optional[str] = None,
+        use_llm_masking: bool = True,
     ):
         """
         Initialize the masked training dataset indexer.
@@ -46,9 +54,10 @@ class MaskedTrainingDatasetIndexer:
         Args:
             embedding_model_name: Name of the sentence transformer model for embeddings
             index_type: FAISS index type (Flat, IVF, HNSW)
-            llm_client: Optional LLM client for transformer-based masking.
-                       If None, falls back to regex-based masking.
-            prompts_dir: Path to the prompts directory for loading prompt templates.
+            llm_client: LLM client for masking (created if not provided)
+            prompts_dir: Path to prompts directory
+            databases_path: Path to database directory (for schema lookup)
+            use_llm_masking: Whether to use LLM-based masking (slower but better)
         """
         self.embedding_model_name = embedding_model_name
         self.index_type = index_type
@@ -60,17 +69,79 @@ class MaskedTrainingDatasetIndexer:
         self.original_sql_store: List[str] = []
         self.metadata_store: List[Dict[str, Any]] = []
         self.dimension: int = 0
+        self.databases_path = databases_path
+        self.use_llm_masking = use_llm_masking
+        self.schema_cache: Dict[str, str] = {}  # Cache schemas by db_id
         
-        # Initialize prompt manager if prompts directory is provided
+        # Initialize LLM client for masking
+        self.llm_client = llm_client
         self.prompt_manager = None
         if prompts_dir and os.path.exists(prompts_dir):
             self.prompt_manager = PromptManager(prompts_dir)
             print(f"Loaded prompt templates from: {prompts_dir}")
         
         self.literal_masker = LiteralMasker(
-            llm_client=llm_client,
+            llm_client=self.llm_client,
             prompt_manager=self.prompt_manager
         )
+    
+    def _get_schema_for_db(self, db_id: str) -> Optional[str]:
+        """
+        Load and format schema for a given database with column types.
+        
+        Args:
+            db_id: Database identifier
+            
+        Returns:
+            Formatted schema string with column types or None if not found
+        """
+        if db_id in self.schema_cache:
+            return self.schema_cache[db_id]
+        
+        if not self.databases_path:
+            return None
+        
+        # Try to find the database directory
+        from pathlib import Path
+        import sqlite3
+        
+        db_dir = Path(self.databases_path) / db_id
+        if not db_dir.exists():
+            return None
+        
+        db_path = db_dir / f"{db_id}.sqlite"
+        if not db_path.exists():
+            return None
+        
+        try:
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+            tables = [row[0] for row in cursor.fetchall()]
+            
+            schema_lines = []
+            for table in tables:
+                cursor.execute(f"PRAGMA table_info({table})")
+                columns = cursor.fetchall()
+                
+                # Format: table ( col1: type, col2: type, ... )
+                col_defs = []
+                for col in columns:
+                    col_name = col[1]
+                    col_type = col[2] if col[2] else 'text'
+                    col_defs.append(f"{col_name}: {col_type}")
+                
+                schema_lines.append(f"# {table} ( {', '.join(col_defs)} )")
+            
+            conn.close()
+            schema_text = "\n\n".join(schema_lines)
+            self.schema_cache[db_id] = schema_text
+            return schema_text
+        except Exception as e:
+            print(f"  Warning: Could not load schema for {db_id}: {e}")
+            return None
 
     def load_model(self):
         """Load the embedding model."""
@@ -128,16 +199,29 @@ class MaskedTrainingDatasetIndexer:
                     if "question" in entry and "SQL" in entry:
                         orig_question = entry["question"]
                         orig_sql = entry["SQL"]
-
-                        masked_questions.append(self.literal_masker.mask_question(orig_question))
+                        db_id = entry.get("db_id", "")
+                        evidence = entry.get("evidence", "")
+                        
+                        # Get schema for this database (for LLM masking)
+                        schema = None
+                        if self.use_llm_masking and self.databases_path:
+                            schema = self._get_schema_for_db(db_id)
+                        
+                        # Mask question using LLM (with schema) or regex (without)
+                        masked_question = self.literal_masker.mask_question(
+                            orig_question, schema=schema, evidence=evidence
+                        )
+                        masked_sql = self.literal_masker.mask_sql(orig_sql)
+                        
+                        masked_questions.append(masked_question)
                         original_questions.append(orig_question)
-                        masked_sqls.append(self.literal_masker.mask_sql(orig_sql))
+                        masked_sqls.append(masked_sql)
                         original_sqls.append(orig_sql)
                         metadata.append({
-                            "db_id": entry.get("db_id", ""),
-                            "evidence": entry.get("evidence", ""),
+                            "db_id": db_id,
+                            "evidence": evidence,
                             "original_sql": orig_sql,
-                            "masked_sql": masked_sqls[-1],
+                            "masked_sql": masked_sql,
                             "difficulty": entry.get("difficulty", "unknown"),
                         })
 
@@ -219,7 +303,7 @@ class MaskedTrainingDatasetIndexer:
         if self.index is None or self.embedding_model is None:
             raise ValueError("Index not built.")
 
-        # Mask the query using the transformer model
+        # Mask the query using LLM
         masked_query = self.literal_masker.mask_question(query)
         print(f"  Original query: {query}")
         print(f"  Masked query:   {masked_query}")
@@ -302,15 +386,17 @@ def main():
     """Main function - builds or loads masked index."""
     # Load configuration
     config = Config()
-    
+
     dataset_path = config.TRAIN_DATASET
     index_path = config.FAISS_INDEX_MASKED
     prompts_dir = config.PROMPTS_DIR
+    databases_path = config.DEV_DATABASES
 
     print(f"Configuration loaded:")
     print(f"  Train Dataset: {dataset_path}")
     print(f"  FAISS Index Path: {index_path}")
     print(f"  Prompts Directory: {prompts_dir}")
+    print(f"  Databases Path: {databases_path}")
 
     if os.path.exists(index_path):
         # Load existing masked index
@@ -323,34 +409,42 @@ def main():
         indexer.load(index_path)
         print(f"Index loaded with {len(indexer.masked_question_store)} entries")
     else:
-        # Initialize Qwen LLM client for transformer-based masking
-        from schema_linking import TransformersLLMClient
-
-        print("Initializing transformer model for literal masking...")
+        # Initialize Qwen LLM client for masking
+        print("\nInitializing LLM client for masking...")
         llm_client = TransformersLLMClient(
             model_name=config.LLM_MODEL_NAME,
             device=config.LLM_DEVICE,
-            max_new_tokens=config.LLM_MAX_NEW_TOKENS,
-            temperature=config.LLM_TEMPERATURE,
+            max_new_tokens=256,
+            temperature=0.0,  # Deterministic for consistent masking
         )
 
-        # Build new masked index with transformer-based masking
+        # Build new masked index with LLM-based masking
+        print("\nBuilding masked index with LLM-based masking...")
+        print("Note: This will take time as each question is processed by the LLM.")
+        print("      Schema will be loaded for each database to enable table/column masking.")
+        
         indexer = MaskedTrainingDatasetIndexer(
             embedding_model_name=config.EMBEDDING_MODEL_NAME,
             index_type=config.FAISS_INDEX_TYPE,
             llm_client=llm_client,
             prompts_dir=prompts_dir,
+            databases_path=databases_path,
+            use_llm_masking=True,
         )
 
+        # Limit entries for testing (remove max_entries for full dataset)
+        max_entries = config.MAX_ENTRIES if config.MAX_ENTRIES else 100
+        print(f"Processing {max_entries} entries...")
+        
         masked_q, orig_q, masked_sql, orig_sql, metadata = indexer.load_dataset(
-            dataset_path, max_entries=config.MAX_ENTRIES
+            dataset_path, max_entries=max_entries
         )
         indexer.build_index(
             masked_q, orig_q, masked_sql, orig_sql, metadata,
             batch_size=config.EMBEDDING_BATCH_SIZE
         )
 
-        print(f"Saving masked index to: {index_path}")
+        print(f"\nSaving masked index to: {index_path}")
         indexer.save(index_path)
         print("Masked index built and saved!")
 

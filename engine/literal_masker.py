@@ -44,9 +44,11 @@ class LiteralMasker:
         Returns:
             Question with literals replaced by placeholders
         """
-        if self._use_llm:
+        if self._use_llm and schema:
+            # Use LLM when schema is provided (can identify table/column names)
             return self._mask_with_llm(question, "question", schema, evidence)
         else:
+            # Use regex when no schema (can only mask values, not table/column names)
             return mask_literals_regex(question)
 
     def mask_sql(self, sql: str) -> str:
@@ -85,13 +87,13 @@ class LiteralMasker:
         try:
             response = self.llm_client.generate(prompt)
             masked_text = self._parse_masking_response(response, text_type)
-            return masked_text if masked_text else text
+            if masked_text and len(masked_text) > 0:
+                return masked_text
+            # If parsing returned empty/None, fall back to regex
+            return mask_literals_regex(text) if text_type == "question" else mask_sql_regex(text)
         except Exception as e:
-            print(f"LLM masking failed: {e}, falling back to regex")
-            if text_type == "question":
-                return mask_literals_regex(text)
-            else:
-                return mask_sql_regex(text)
+            # On any error, fall back to regex
+            return mask_literals_regex(text) if text_type == "question" else mask_sql_regex(text)
 
     def _build_question_masking_prompt(self, question: str, schema: Optional[str] = None, evidence: Optional[str] = None) -> str:
         """Build prompt for masking a natural language question using prompt template."""
@@ -161,46 +163,62 @@ Do NOT replace column names, table names, SQL keywords, or function names. Only 
         Returns:
             Extracted masked text or None if parsing fails
         """
-        # First, try to extract from "### Masked Question:" or "### Masked SQL:" format
-        # (used by question_masking.txt prompt template)
         import re
+        
+        response = response.strip()
         
         if text_type == "question":
             # Look for content after "### Masked Question:"
-            match = re.search(r"### Masked Question:\s*(.+?)(?=###|$)", response, re.DOTALL)
+            match = re.search(r"### Masked Question:\s*\n?(.+?)(?=###|\(|$)", response, re.DOTALL)
             if match:
                 masked_text = match.group(1).strip()
                 if masked_text:
-                    return masked_text
-        
-        # Try to find JSON format (fallback for backward compatibility)
-        try:
-            start_idx = response.find("{")
-            end_idx = response.rfind("}") + 1
+                    # Clean up: remove any parenthetical instructions
+                    masked_text = re.sub(r'\s*\([^)]*\)\s*$', '', masked_text).strip()
+                    # Take only the first line
+                    first_line = masked_text.split('\n')[0].strip()
+                    if first_line and len(first_line) > 3:
+                        return first_line
+            
+            # Fallback: The response itself might be the masked question
+            # Remove any "###" markers or instructions
+            lines = response.split('\n')
+            for line in lines:
+                line = line.strip()
+                if line and not line.startswith('###') and not line.lower().startswith(('here', 'the', 'answer', 'masked', 'respond')):
+                    # Remove parenthetical instructions
+                    line = re.sub(r'\s*\([^)]*\)\s*$', '', line).strip()
+                    if line and len(line) > 3:
+                        return line
+            
+            return response if response else None
 
-            if start_idx != -1 and end_idx > start_idx:
-                json_str = response[start_idx:end_idx]
-                result = json.loads(json_str)
-                masked_text = result.get("masked_text", "")
+        # For SQL: try to find JSON format (only if response starts with {)
+        if response.startswith('{'):
+            try:
+                start_idx = response.find("{")
+                end_idx = response.rfind("}") + 1
 
-                if masked_text:
-                    return masked_text
-        except (json.JSONDecodeError, Exception) as e:
-            print(f"Error parsing masking response: {e}")
+                if start_idx != -1 and end_idx > start_idx:
+                    json_str = response[start_idx:end_idx]
+                    result = json.loads(json_str)
+                    masked_text = result.get("masked_text", "")
 
-        # Try to extract masked text directly if JSON parsing fails
-        lines = response.strip().split("\n")
-        for line in lines:
-            if '"' in line and ("masked" in line.lower() or "text" in line.lower()):
-                # Extract content between quotes after colon
-                match = re.search(r':\s*"([^"]+)"', line)
-                if match:
-                    return match.group(1)
+                    if masked_text:
+                        return masked_text
+            except Exception:
+                pass
 
-        # If all else fails, return the entire response (trimmed)
-        # This handles cases where LLM just outputs the masked text directly
-        if response.strip():
-            return response.strip()
+        # Fallback for SQL: return the response after the last colon
+        if response:
+            parts = response.split('\n')
+            for part in reversed(parts):
+                if ':' in part:
+                    text = part.split(':', 1)[-1].strip()
+                    if text and len(text) > 5:
+                        return text
+            
+            return response
 
         return None
 

@@ -3,8 +3,39 @@ in the question.
 
 Use these placeholder types:
 - [TABLE] for table names
-- [COLUMN] for column names
+- [COLUMN] for column names  
 - [VALUE] for literal values (numbers, strings, dates, etc.)
+
+<example1>
+### SQLite SQL tables, with their properties:
+# customers ( CustomerID: integer, Segment: text, Currency: text )
+# gasstations ( GasStationID: integer, ChainID: integer, Country: text, Segment: text )
+# products ( ProductID: integer, Description: text )
+# transactions_1k ( TransactionID: integer, Date: date, Time: text, CustomerID: integer, CardID: integer, GasStationID: integer, ProductID: integer, Amount: integer, Price: real )
+# yearmonth ( CustomerID: integer, Date: text, Consumption: real )
+### Question: For all the people who paid more than 29.00 per unit of product id No.5. Give their consumption status in the August of 2012.
+### Masked Question: For all the [TABLE] who paid more than [VALUE] per unit of [COLUMN] [VALUE]. Give their consumption status in the [VALUE].
+</example1>
+
+<example2>
+### SQLite SQL tables, with their properties:
+# customers ( CustomerID: integer, Segment: text, Currency: text )
+# gasstations ( GasStationID: integer, ChainID: integer, Country: text, Segment: text )
+# products ( ProductID: integer, Description: text )
+# transactions_1k ( TransactionID: integer, Date: date, Time: text, CustomerID: integer, CardID: integer, GasStationID: integer, ProductID: integer, Amount: integer, Price: real )
+# yearmonth ( CustomerID: integer, Date: text, Consumption: real )
+### Question: How much did customer 6 consume in total between August and November 2013?
+### Masked Question: How much did [TABLE] [VALUE] consume in total between [VALUE] and [VALUE]?
+</example2>
+
+<example3>
+### SQLite SQL tables, with their properties:
+# drivers ( driverId: integer, driverRef: text, number: integer, code: text, forename: text, surname: text, dob: date, nationality: text, url: text )
+### Question: How many Australian drivers who were born in 1980?
+### Masked Question: How many [VALUE] [TABLE] who were born in [VALUE]?
+</example3>
+
+### Your Task:
 
 ### SQLite SQL tables, with their properties:
 {schema_text}
