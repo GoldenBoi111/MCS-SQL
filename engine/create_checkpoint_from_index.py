@@ -34,32 +34,33 @@ def create_checkpoint_from_index():
     with open(os.path.join(index_path, "config.json"), "r") as f:
         index_config = json.load(f)
     
-    # Load stores
+    # Load stores (matching names from training_dataset_indexer_masked.py)
     with open(os.path.join(index_path, "masked_question_store.pkl"), "rb") as f:
         masked_questions = pickle.load(f)
     with open(os.path.join(index_path, "original_question_store.pkl"), "rb") as f:
         original_questions = pickle.load(f)
-    with open(os.path.join(index_path, "sql_store.pkl"), "rb") as f:
-        # Note: This might be original_sql or masked_sql depending on version
-        sql_store = pickle.load(f)
+    with open(os.path.join(index_path, "masked_sql_store.pkl"), "rb") as f:
+        masked_sqls = pickle.load(f)
+    with open(os.path.join(index_path, "original_sql_store.pkl"), "rb") as f:
+        original_sqls = pickle.load(f)
     with open(os.path.join(index_path, "metadata_store.pkl"), "rb") as f:
         metadata = pickle.load(f)
-    
+
     processed_count = len(masked_questions)
     print(f"Found {processed_count} entries in existing index")
-    
+
     # Create checkpoint directory
     os.makedirs(checkpoint_path, exist_ok=True)
-    
-    # Save checkpoint data
+
+    # Save checkpoint data (matching names expected by load_checkpoint)
     with open(os.path.join(checkpoint_path, "masked_questions.pkl"), "wb") as f:
         pickle.dump(masked_questions, f)
     with open(os.path.join(checkpoint_path, "original_questions.pkl"), "wb") as f:
         pickle.dump(original_questions, f)
     with open(os.path.join(checkpoint_path, "masked_sqls.pkl"), "wb") as f:
-        pickle.dump(sql_store, f)  # Assuming this is masked SQL
+        pickle.dump(masked_sqls, f)
     with open(os.path.join(checkpoint_path, "original_sqls.pkl"), "wb") as f:
-        pickle.dump(sql_store, f)  # May need to adjust
+        pickle.dump(original_sqls, f)
     with open(os.path.join(checkpoint_path, "metadata.pkl"), "wb") as f:
         pickle.dump(metadata, f)
     

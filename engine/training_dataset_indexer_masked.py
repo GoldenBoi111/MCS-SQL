@@ -650,6 +650,8 @@ class MaskedTrainingDatasetIndexer:
 
 def main():
     """Main function - builds or loads masked index with checkpoint support."""
+    import shutil
+
     # Load configuration
     config = Config()
 
@@ -657,10 +659,13 @@ def main():
     index_path = config.FAISS_INDEX_MASKED
     prompts_dir = config.PROMPTS_DIR
     databases_path = config.DEV_DATABASES
-    
+
     # Checkpoint configuration
     checkpoint_path = str(index_path) + ".checkpoint"  # Save checkpoint next to index
     checkpoint_every = 500  # Save every 500 entries
+
+    # Determine target entry count
+    max_entries = config.MAX_ENTRIES if config.MAX_ENTRIES else None
 
     print(f"Configuration loaded:")
     print(f"  Train Dataset: {dataset_path}")
@@ -669,21 +674,69 @@ def main():
     print(f"  Databases Path: {databases_path}")
     print(f"  Checkpoint Path: {checkpoint_path}")
     print(f"  Checkpoint Interval: Every {checkpoint_every} entries")
+    print(f"  Target entries: {max_entries if max_entries else 'ALL'}")
 
     # Try to load existing checkpoint
     checkpoint_data = MaskedTrainingDatasetIndexer.load_checkpoint(checkpoint_path, config)
-    
+
+    # Determine if we should resume from checkpoint
+    should_resume = False
     if checkpoint_data:
-        # Resume from checkpoint
         indexer, processed_count, resume_index, masked_q, orig_q, masked_sql, orig_sql, metadata = checkpoint_data
-        
-        print(f"\n{'='*60}")
-        print(f"RESUMING FROM CHECKPOINT")
-        print(f"{'='*60}")
-        print(f"Already processed: {processed_count} entries")
-        print(f"Resuming from index: {resume_index}")
-        print(f"Loading remaining entries and continuing...\n")
-    else:
+
+        # Check if checkpoint is incomplete (has fewer entries than target)
+        target_count = max_entries if max_entries else float('inf')
+        if processed_count < target_count:
+            should_resume = True
+            print(f"\n{'='*60}")
+            print(f"RESUMING FROM CHECKPOINT")
+            print(f"{'='*60}")
+            print(f"Already processed: {processed_count} entries")
+            print(f"Resuming from index: {resume_index}")
+            print(f"Target: {target_count} entries")
+            print(f"Remaining: {target_count - processed_count if max_entries else 'unknown'} entries")
+            print(f"Loading remaining entries and continuing...\n")
+
+            # Initialize LLM client for masking (needed for resume)
+            llm_client = TransformersLLMClient(
+                model_name=config.LLM_MODEL_NAME,
+                device=config.LLM_DEVICE,
+                max_new_tokens=256,
+                temperature=0.0,  # Deterministic for consistent masking
+            )
+            # Update indexer's llm_client and literal_masker
+            indexer.llm_client = llm_client
+            indexer.literal_masker = LiteralMasker(
+                llm_client=llm_client,
+                prompt_manager=indexer.prompt_manager
+            )
+
+            # Load remaining entries and append to checkpoint data
+            remaining_masked_q, remaining_orig_q, remaining_masked_sql, remaining_orig_sql, remaining_metadata = indexer.load_dataset(
+                dataset_path,
+                max_entries=max_entries,
+                checkpoint_path=checkpoint_path,
+                checkpoint_every=checkpoint_every,
+                resume_index=resume_index,
+            )
+
+            # Combine checkpoint data with newly loaded data
+            masked_q = masked_q + remaining_masked_q
+            orig_q = orig_q + remaining_orig_q
+            masked_sql = masked_sql + remaining_masked_sql
+            orig_sql = orig_sql + remaining_orig_sql
+            metadata = metadata + remaining_metadata
+        else:
+            # Checkpoint is complete or exceeds target - treat as already built
+            print(f"\n{'='*60}")
+            print(f"CHECKPOINT COMPLETE OR EXCEEDS TARGET")
+            print(f"{'='*60}")
+            print(f"Checkpoint has {processed_count} entries (target: {target_count})")
+            print(f"Treating as already built - skipping index generation.\n")
+            # Keep checkpoint folder (do not delete)
+            return  # Exit early - index is already built
+
+    if not should_resume:
         # Initialize LLM client for masking
         print("\nInitializing LLM client for masking...")
         llm_client = TransformersLLMClient(
@@ -699,7 +752,7 @@ def main():
         print("      Schema will be loaded for each database and cached in schema_cache.json")
         print("      Subsequent runs will be faster as schemas are cached.")
         print("      Checkpoints will be saved every 500 entries for resumability.")
-        
+
         indexer = MaskedTrainingDatasetIndexer(
             embedding_model_name=config.EMBEDDING_MODEL_NAME,
             index_type=config.FAISS_INDEX_TYPE,
@@ -709,23 +762,19 @@ def main():
             use_llm_masking=True,
         )
 
-        # Limit entries for testing (remove max_entries for full dataset)
-        max_entries = config.MAX_ENTRIES if config.MAX_ENTRIES else None
-        resume_index = 0
-        
         if max_entries:
             print(f"Processing {max_entries} entries...")
         else:
             print(f"Processing ALL entries...")
-        
+
         masked_q, orig_q, masked_sql, orig_sql, metadata = indexer.load_dataset(
-            dataset_path, 
+            dataset_path,
             max_entries=max_entries,
             checkpoint_path=checkpoint_path,
             checkpoint_every=checkpoint_every,
-            resume_index=resume_index,
+            resume_index=0,
         )
-    
+
     # Build index
     indexer.build_index(
         masked_q, orig_q, masked_sql, orig_sql, metadata,
@@ -735,16 +784,10 @@ def main():
     # Save final index
     print(f"\nSaving masked index to: {index_path}")
     indexer.save(index_path)
-    
-    # Clean up checkpoint after successful save
-    import shutil
-    if os.path.exists(checkpoint_path):
-        try:
-            shutil.rmtree(checkpoint_path)
-            print(f"Checkpoint cleaned up: {checkpoint_path}")
-        except Exception as e:
-            print(f"  Warning: Could not clean up checkpoint: {e}")
-    
+
+    # Keep checkpoint folder (do not delete)
+    print(f"Checkpoint preserved: {checkpoint_path}")
+
     print("Masked index built and saved!")
 
 
