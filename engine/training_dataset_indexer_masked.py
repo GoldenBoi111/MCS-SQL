@@ -309,16 +309,16 @@ class MaskedTrainingDatasetIndexer:
         try:
             with open(checkpoint_file, "r") as f:
                 checkpoint_data = json.load(f)
-            
+
             processed_count = checkpoint_data.get("processed_count", 0)
             resume_index = checkpoint_data.get("start_index", processed_count)
-            
+
             # Create indexer
             indexer = cls(
                 embedding_model_name=checkpoint_data.get("embedding_model_name", config.EMBEDDING_MODEL_NAME),
                 index_type=checkpoint_data.get("index_type", config.FAISS_INDEX_TYPE),
             )
-            
+
             # Load partial data
             with open(os.path.join(checkpoint_path, "masked_questions.pkl"), "rb") as f:
                 masked_q = pickle.load(f)
@@ -330,7 +330,14 @@ class MaskedTrainingDatasetIndexer:
                 orig_sql = pickle.load(f)
             with open(os.path.join(checkpoint_path, "metadata.pkl"), "rb") as f:
                 metadata = pickle.load(f)
-            
+
+            # Assign loaded data to indexer's stores
+            indexer.masked_question_store = masked_q
+            indexer.original_question_store = orig_q
+            indexer.masked_sql_store = masked_sql
+            indexer.original_sql_store = orig_sql
+            indexer.metadata_store = metadata
+
             print(f"Checkpoint loaded: {processed_count} entries already processed")
             print(f"Resume index: {resume_index}")
             return (indexer, processed_count, resume_index, masked_q, orig_q, masked_sql, orig_sql, metadata)
