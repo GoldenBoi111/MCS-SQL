@@ -13,7 +13,7 @@ Example:
 
 This version uses LLM-based masking (Qwen) to identify and replace:
 - Table names → [TABLE]
-- Column names → [COLUMN]  
+- Column names → [COLUMN]
 - Literal values → [VALUE]
 
 Note: This is slower than regex-based masking but provides better generalization.
@@ -73,17 +73,16 @@ class MaskedTrainingDatasetIndexer:
         self.databases_path = databases_path
         self.use_llm_masking = use_llm_masking
         self.schema_cache: Dict[str, str] = {}  # Cache schemas by db_id
-        
+
         # Initialize LLM client for masking
         self.llm_client = llm_client
         self.prompt_manager = None
         if prompts_dir and os.path.exists(prompts_dir):
             self.prompt_manager = PromptManager(prompts_dir)
             print(f"Loaded prompt templates from: {prompts_dir}")
-        
+
         self.literal_masker = LiteralMasker(
-            llm_client=self.llm_client,
-            prompt_manager=self.prompt_manager
+            llm_client=self.llm_client, prompt_manager=self.prompt_manager
         )
 
     def load_model(self):
@@ -99,22 +98,26 @@ class MaskedTrainingDatasetIndexer:
         """
         Load and format schema for a given database with column types.
         Uses JSON cache to avoid reloading schemas on subsequent runs.
-        
+
         Args:
             db_id: Database identifier
-            
+
         Returns:
             Formatted schema string with column types or None if not found
         """
         # Check in-memory cache first
         if db_id in self.schema_cache:
             return self.schema_cache[db_id]
-        
+
         # Try to load from JSON cache file
-        cache_file = Path(self.databases_path) / "schema_cache.json" if self.databases_path else None
+        cache_file = (
+            Path(self.databases_path) / "schema_cache.json"
+            if self.databases_path
+            else None
+        )
         if cache_file and cache_file.exists():
             try:
-                with open(cache_file, 'r', encoding='utf-8') as f:
+                with open(cache_file, "r", encoding="utf-8") as f:
                     all_schemas = json.load(f)
                     if db_id in all_schemas:
                         schema_text = all_schemas[db_id]
@@ -122,31 +125,31 @@ class MaskedTrainingDatasetIndexer:
                         return schema_text
             except Exception as e:
                 print(f"  Warning: Could not read schema cache: {e}")
-        
+
         # Not in cache - load from database and save it
         if not self.databases_path:
             return None
-        
+
         import sqlite3
-        
+
         db_dir = Path(self.databases_path) / db_id
         if not db_dir.exists():
             return None
-        
+
         db_path = db_dir / f"{db_id}.sqlite"
         if not db_path.exists():
             return None
-        
+
         try:
             conn = sqlite3.connect(str(db_path))
             cursor = conn.cursor()
-            
+
             # Get all tables (including those with special names)
             cursor.execute(
                 'SELECT name FROM sqlite_master WHERE type="table" AND name NOT LIKE "sqlite_%"'
             )
             tables = [row[0] for row in cursor.fetchall()]
-            
+
             schema_lines = []
             for table in tables:
                 # Escape table names with special characters using brackets
@@ -154,57 +157,61 @@ class MaskedTrainingDatasetIndexer:
                 try:
                     cursor.execute(f'PRAGMA table_info("[{table}]")')
                     columns = cursor.fetchall()
-                    
+
                     # Format: table ( col1: type, col2: type, ... )
                     col_defs = []
                     for col in columns:
                         col_name = col[1]
-                        col_type = col[2] if col[2] else 'text'
+                        col_type = col[2] if col[2] else "text"
                         col_defs.append(f"{col_name}: {col_type}")
-                    
+
                     schema_lines.append(f"# {table} ( {', '.join(col_defs)} )")
                 except Exception as col_err:
-                    print(f"  Warning: Could not get columns for {table} in {db_id}: {col_err}")
+                    print(
+                        f"  Warning: Could not get columns for {table} in {db_id}: {col_err}"
+                    )
                     continue
-            
+
             conn.close()
-            schema_text = "\n\n".join(schema_lines) if schema_lines else "# No tables found"
-            
+            schema_text = (
+                "\n\n".join(schema_lines) if schema_lines else "# No tables found"
+            )
+
             # Cache in memory
             self.schema_cache[db_id] = schema_text
-            
+
             # Save to JSON cache file
             if cache_file:
                 self._save_schema_to_cache(db_id, schema_text, cache_file)
-            
+
             return schema_text
         except Exception as e:
             print(f"  Warning: Could not load schema for {db_id}: {e}")
             return None
-    
+
     def preload_schemas(self, db_ids: List[str]):
         """
         Preload schemas for all unique database IDs.
         Checks cache first, only loads missing schemas from databases.
-        
+
         Args:
             db_ids: List of unique database IDs to preload
         """
         if not self.databases_path:
             return
-        
+
         cache_file = Path(self.databases_path) / "schema_cache.json"
-        
+
         # Load existing cache
         all_schemas = {}
         if cache_file.exists():
             try:
-                with open(cache_file, 'r', encoding='utf-8') as f:
+                with open(cache_file, "r", encoding="utf-8") as f:
                     all_schemas = json.load(f)
                     print(f"Loaded {len(all_schemas)} schemas from cache")
             except Exception as e:
                 print(f"  Warning: Could not read schema cache: {e}")
-        
+
         # Find which schemas are missing
         missing_schemas = []
         for db_id in db_ids:
@@ -212,7 +219,7 @@ class MaskedTrainingDatasetIndexer:
                 self.schema_cache[db_id] = all_schemas[db_id]
             else:
                 missing_schemas.append(db_id)
-        
+
         # Load missing schemas
         if missing_schemas:
             print(f"Loading {len(missing_schemas)} missing schemas from databases...")
@@ -220,22 +227,22 @@ class MaskedTrainingDatasetIndexer:
                 schema = self._get_schema_for_db(db_id)
                 if schema:
                     all_schemas[db_id] = schema
-            
+
             # Save complete cache
             if cache_file and all_schemas:
                 try:
-                    with open(cache_file, 'w', encoding='utf-8') as f:
+                    with open(cache_file, "w", encoding="utf-8") as f:
                         json.dump(all_schemas, f, indent=2, ensure_ascii=False)
                     print(f"Saved {len(all_schemas)} schemas to cache: {cache_file}")
                 except Exception as e:
                     print(f"  Warning: Could not save schema cache: {e}")
         else:
             print("All schemas found in cache!")
-    
+
     def _save_schema_to_cache(self, db_id: str, schema_text: str, cache_file: Path):
         """
         Save a schema to the JSON cache file.
-        
+
         Args:
             db_id: Database identifier
             schema_text: Formatted schema string
@@ -245,25 +252,32 @@ class MaskedTrainingDatasetIndexer:
         all_schemas = {}
         if cache_file.exists():
             try:
-                with open(cache_file, 'r', encoding='utf-8') as f:
+                with open(cache_file, "r", encoding="utf-8") as f:
                     all_schemas = json.load(f)
             except Exception:
                 all_schemas = {}
-        
+
         # Add new schema
         all_schemas[db_id] = schema_text
-        
+
         # Save back to file
         try:
-            with open(cache_file, 'w', encoding='utf-8') as f:
+            with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(all_schemas, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print(f"  Warning: Could not save schema cache: {e}")
 
-    def save_checkpoint(self, checkpoint_path: str, processed_count: int, start_index: int = 0,
-                        masked_questions: Optional[List[str]] = None, original_questions: Optional[List[str]] = None,
-                        masked_sqls: Optional[List[str]] = None, original_sqls: Optional[List[str]] = None,
-                        metadata: Optional[List[Dict[str, Any]]] = None):
+    def save_checkpoint(
+        self,
+        checkpoint_path: str,
+        processed_count: int,
+        start_index: int = 0,
+        masked_questions: Optional[List[str]] = None,
+        original_questions: Optional[List[str]] = None,
+        masked_sqls: Optional[List[str]] = None,
+        original_sqls: Optional[List[str]] = None,
+        metadata: Optional[List[Dict[str, Any]]] = None,
+    ):
         """
         Save a checkpoint that can be resumed later.
 
@@ -280,8 +294,16 @@ class MaskedTrainingDatasetIndexer:
         os.makedirs(checkpoint_path, exist_ok=True)
 
         # Use provided lists or fall back to instance stores
-        mq = masked_questions if masked_questions is not None else self.masked_question_store
-        oq = original_questions if original_questions is not None else self.original_question_store
+        mq = (
+            masked_questions
+            if masked_questions is not None
+            else self.masked_question_store
+        )
+        oq = (
+            original_questions
+            if original_questions is not None
+            else self.original_question_store
+        )
         ms = masked_sqls if masked_sqls is not None else self.masked_sql_store
         osql = original_sqls if original_sqls is not None else self.original_sql_store
         md = metadata if metadata is not None else self.metadata_store
@@ -308,28 +330,34 @@ class MaskedTrainingDatasetIndexer:
         with open(os.path.join(checkpoint_path, "checkpoint.json"), "w") as f:
             json.dump(checkpoint_data, f, indent=2)
 
-        print(f"  Checkpoint saved: {processed_count} entries processed (index {start_index})")
-    
+        print(
+            f"  Checkpoint saved: {processed_count} entries processed (index {start_index})"
+        )
+
     @classmethod
-    def load_checkpoint(cls, checkpoint_path: str, config: Config) -> Optional[Tuple["MaskedTrainingDatasetIndexer", int, int, List, List, List, List, List]]:
+    def load_checkpoint(
+        cls, checkpoint_path: str, config: Config
+    ) -> Optional[
+        Tuple["MaskedTrainingDatasetIndexer", int, int, List, List, List, List, List]
+    ]:
         """
         Load a checkpoint to resume processing.
-        
+
         Args:
             checkpoint_path: Directory containing checkpoint files
             config: Configuration object
-            
+
         Returns:
             Tuple of (indexer, processed_count, resume_index, masked_q, orig_q, masked_sql, orig_sql, metadata)
             or None if no checkpoint exists
         """
         if not os.path.exists(checkpoint_path):
             return None
-        
+
         checkpoint_file = os.path.join(checkpoint_path, "checkpoint.json")
         if not os.path.exists(checkpoint_file):
             return None
-        
+
         try:
             with open(checkpoint_file, "r") as f:
                 checkpoint_data = json.load(f)
@@ -339,14 +367,18 @@ class MaskedTrainingDatasetIndexer:
 
             # Create indexer
             indexer = cls(
-                embedding_model_name=checkpoint_data.get("embedding_model_name", config.EMBEDDING_MODEL_NAME),
+                embedding_model_name=checkpoint_data.get(
+                    "embedding_model_name", config.EMBEDDING_MODEL_NAME
+                ),
                 index_type=checkpoint_data.get("index_type", config.FAISS_INDEX_TYPE),
             )
 
             # Load partial data
             with open(os.path.join(checkpoint_path, "masked_questions.pkl"), "rb") as f:
                 masked_q = pickle.load(f)
-            with open(os.path.join(checkpoint_path, "original_questions.pkl"), "rb") as f:
+            with open(
+                os.path.join(checkpoint_path, "original_questions.pkl"), "rb"
+            ) as f:
                 orig_q = pickle.load(f)
             with open(os.path.join(checkpoint_path, "masked_sqls.pkl"), "rb") as f:
                 masked_sql = pickle.load(f)
@@ -364,15 +396,19 @@ class MaskedTrainingDatasetIndexer:
 
             print(f"Checkpoint loaded: {processed_count} entries already processed")
             print(f"Resume index: {resume_index}")
-            return (indexer, processed_count, resume_index, masked_q, orig_q, masked_sql, orig_sql, metadata)
+            return (
+                indexer,
+                processed_count,
+                resume_index,
+                masked_q,
+                orig_q,
+                masked_sql,
+                orig_sql,
+                metadata,
+            )
         except Exception as e:
             print(f"  Warning: Could not load checkpoint: {e}")
             return None
-
-        print(f"Loading embedding model: {self.embedding_model_name}...")
-        self.embedding_model = SentenceTransformer(self.embedding_model_name)
-        self.dimension = self.embedding_model.get_sentence_embedding_dimension()
-        print(f"Embedding dimension: {self.dimension}")
 
     def create_index(self):
         """Create FAISS index."""
@@ -431,24 +467,29 @@ class MaskedTrainingDatasetIndexer:
                 for entry in data[:max_entries]:
                     if "db_id" in entry:
                         unique_db_ids.add(entry["db_id"])
-        
-        print(f"Found {len(unique_db_ids)} unique databases: {', '.join(sorted(unique_db_ids)[:10])}{'...' if len(unique_db_ids) > 10 else ''}")
-        
+
+        print(
+            f"Found {len(unique_db_ids)} unique databases: {', '.join(sorted(unique_db_ids)[:10])}{'...' if len(unique_db_ids) > 10 else ''}"
+        )
+
         # Preload all schemas (checks cache first, loads missing)
         if self.use_llm_masking and self.databases_path:
             print("\nPreloading schemas...")
             self.preload_schemas(list(unique_db_ids))
-        
+
         # Second pass: load and mask
         print(f"\nLoading and masking entries (starting from index {resume_index})...")
         with open(dataset_path, "r", encoding="utf-8") as f:
             data = json.load(f)
             if isinstance(data, list):
                 # Skip already processed entries
-                for idx, entry in tqdm(enumerate(data[:max_entries]), total=len(data[:max_entries]), initial=resume_index, desc="Loading & Masking"):
-                    if idx < resume_index:
-                        continue  # Skip already processed
-                    
+                for idx, entry in tqdm(
+                    enumerate(data[resume_index:max_entries], start=resume_index),
+                    total=len(data[:max_entries]),
+                    initial=resume_index,
+                    desc="Loading & Masking",
+                ):
+
                     if "question" in entry and "SQL" in entry:
                         orig_question = entry["question"]
                         orig_sql = entry["SQL"]
@@ -470,29 +511,40 @@ class MaskedTrainingDatasetIndexer:
                         original_questions.append(orig_question)
                         masked_sqls.append(masked_sql)
                         original_sqls.append(orig_sql)
-                        metadata.append({
-                            "db_id": db_id,
-                            "evidence": evidence,
-                            "original_sql": orig_sql,
-                            "masked_sql": masked_sql,
-                            "difficulty": entry.get("difficulty", "unknown"),
-                        })
-                        
+                        metadata.append(
+                            {
+                                "db_id": db_id,
+                                "evidence": evidence,
+                                "original_sql": orig_sql,
+                                "masked_sql": masked_sql,
+                                "difficulty": entry.get("difficulty", "unknown"),
+                            }
+                        )
+
                         # Save checkpoint periodically
-                        if checkpoint_path and len(masked_questions) % checkpoint_every == 0:
+                        if (
+                            checkpoint_path
+                            and len(masked_questions) % checkpoint_every == 0
+                        ):
                             self.save_checkpoint(
-                                checkpoint_path, 
-                                len(masked_questions) + resume_index, 
+                                checkpoint_path,
+                                len(masked_questions) + resume_index,
                                 idx + 1,
                                 masked_questions=masked_questions,
                                 original_questions=original_questions,
                                 masked_sqls=masked_sqls,
                                 original_sqls=original_sqls,
-                                metadata=metadata
+                                metadata=metadata,
                             )
 
         print(f"Extracted and masked {len(masked_questions)} question-SQL pairs")
-        return masked_questions, original_questions, masked_sqls, original_sqls, metadata
+        return (
+            masked_questions,
+            original_questions,
+            masked_sqls,
+            original_sqls,
+            metadata,
+        )
 
     def build_index(
         self,
@@ -544,7 +596,7 @@ class MaskedTrainingDatasetIndexer:
             )
             embeddings = np.asarray(embeddings, dtype=np.float32)
             self.index.add(embeddings)
-            
+
             self.masked_question_store.extend(batch_masked)
             self.original_question_store.extend(batch_orig)
             self.masked_sql_store.extend(batch_masked_sql)
@@ -585,21 +637,23 @@ class MaskedTrainingDatasetIndexer:
         results = []
         for score, idx in zip(scores[0], indices[0]):
             if idx >= 0 and idx < len(self.masked_question_store):
-                results.append((
-                    self.masked_question_store[idx],
-                    self.original_question_store[idx],
-                    self.masked_sql_store[idx],
-                    self.original_sql_store[idx],
-                    self.metadata_store[idx],
-                    float(score)
-                ))
+                results.append(
+                    (
+                        self.masked_question_store[idx],
+                        self.original_question_store[idx],
+                        self.masked_sql_store[idx],
+                        self.original_sql_store[idx],
+                        self.metadata_store[idx],
+                        float(score),
+                    )
+                )
         return results
 
     def save(self, save_path: str):
         """Save index and data to disk."""
         os.makedirs(save_path, exist_ok=True)
         faiss.write_index(self.index, os.path.join(save_path, "faiss_index.bin"))
-        
+
         with open(os.path.join(save_path, "masked_question_store.pkl"), "wb") as f:
             pickle.dump(self.masked_question_store, f)
         with open(os.path.join(save_path, "original_question_store.pkl"), "wb") as f:
@@ -610,7 +664,7 @@ class MaskedTrainingDatasetIndexer:
             pickle.dump(self.original_sql_store, f)
         with open(os.path.join(save_path, "metadata_store.pkl"), "wb") as f:
             pickle.dump(self.metadata_store, f)
-        
+
         config = {
             "embedding_model_name": self.embedding_model_name,
             "index_type": self.index_type,
@@ -625,14 +679,14 @@ class MaskedTrainingDatasetIndexer:
         """Load index and data from disk."""
         with open(os.path.join(load_path, "config.json"), "r") as f:
             config = json.load(f)
-        
+
         self.embedding_model_name = config["embedding_model_name"]
         self.index_type = config["index_type"]
         self.dimension = config["dimension"]
-        
+
         self.load_model()
         self.index = faiss.read_index(os.path.join(load_path, "faiss_index.bin"))
-        
+
         with open(os.path.join(load_path, "masked_question_store.pkl"), "rb") as f:
             self.masked_question_store = pickle.load(f)
         with open(os.path.join(load_path, "original_question_store.pkl"), "rb") as f:
@@ -643,7 +697,7 @@ class MaskedTrainingDatasetIndexer:
             self.original_sql_store = pickle.load(f)
         with open(os.path.join(load_path, "metadata_store.pkl"), "rb") as f:
             self.metadata_store = pickle.load(f)
-        
+
         print(f"Masked index loaded from: {load_path}")
         print(f"Total entries: {len(self.masked_question_store)}")
 
@@ -677,15 +731,26 @@ def main():
     print(f"  Target entries: {max_entries if max_entries else 'ALL'}")
 
     # Try to load existing checkpoint
-    checkpoint_data = MaskedTrainingDatasetIndexer.load_checkpoint(checkpoint_path, config)
+    checkpoint_data = MaskedTrainingDatasetIndexer.load_checkpoint(
+        checkpoint_path, config
+    )
 
     # Determine if we should resume from checkpoint
     should_resume = False
     if checkpoint_data:
-        indexer, processed_count, resume_index, masked_q, orig_q, masked_sql, orig_sql, metadata = checkpoint_data
+        (
+            indexer,
+            processed_count,
+            resume_index,
+            masked_q,
+            orig_q,
+            masked_sql,
+            orig_sql,
+            metadata,
+        ) = checkpoint_data
 
         # Check if checkpoint is incomplete (has fewer entries than target)
-        target_count = max_entries if max_entries else float('inf')
+        target_count = max_entries if max_entries else float("inf")
         if processed_count < target_count:
             should_resume = True
             print(f"\n{'='*60}")
@@ -694,7 +759,9 @@ def main():
             print(f"Already processed: {processed_count} entries")
             print(f"Resuming from index: {resume_index}")
             print(f"Target: {target_count} entries")
-            print(f"Remaining: {target_count - processed_count if max_entries else 'unknown'} entries")
+            print(
+                f"Remaining: {target_count - processed_count if max_entries else 'unknown'} entries"
+            )
             print(f"Loading remaining entries and continuing...\n")
 
             # Initialize LLM client for masking (needed for resume)
@@ -707,12 +774,17 @@ def main():
             # Update indexer's llm_client and literal_masker
             indexer.llm_client = llm_client
             indexer.literal_masker = LiteralMasker(
-                llm_client=llm_client,
-                prompt_manager=indexer.prompt_manager
+                llm_client=llm_client, prompt_manager=indexer.prompt_manager
             )
 
             # Load remaining entries and append to checkpoint data
-            remaining_masked_q, remaining_orig_q, remaining_masked_sql, remaining_orig_sql, remaining_metadata = indexer.load_dataset(
+            (
+                remaining_masked_q,
+                remaining_orig_q,
+                remaining_masked_sql,
+                remaining_orig_sql,
+                remaining_metadata,
+            ) = indexer.load_dataset(
                 dataset_path,
                 max_entries=max_entries,
                 checkpoint_path=checkpoint_path,
@@ -749,7 +821,9 @@ def main():
         # Build new masked index with LLM-based masking
         print("\nBuilding masked index with LLM-based masking...")
         print("Note: This will take time as each question is processed by the LLM.")
-        print("      Schema will be loaded for each database and cached in schema_cache.json")
+        print(
+            "      Schema will be loaded for each database and cached in schema_cache.json"
+        )
         print("      Subsequent runs will be faster as schemas are cached.")
         print("      Checkpoints will be saved every 500 entries for resumability.")
 
@@ -777,8 +851,12 @@ def main():
 
     # Build index
     indexer.build_index(
-        masked_q, orig_q, masked_sql, orig_sql, metadata,
-        batch_size=config.EMBEDDING_BATCH_SIZE
+        masked_q,
+        orig_q,
+        masked_sql,
+        orig_sql,
+        metadata,
+        batch_size=config.EMBEDDING_BATCH_SIZE,
     )
 
     # Save final index
