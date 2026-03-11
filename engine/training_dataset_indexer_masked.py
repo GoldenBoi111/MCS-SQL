@@ -295,18 +295,30 @@ class MaskedTrainingDatasetIndexer:
 
         # Use provided lists or fall back to instance stores
         mq = (
-            masked_questions
+            self.masked_question_store + masked_questions
             if masked_questions is not None
             else self.masked_question_store
         )
         oq = (
-            original_questions
+            self.original_question_store + original_questions
             if original_questions is not None
             else self.original_question_store
         )
-        ms = masked_sqls if masked_sqls is not None else self.masked_sql_store
-        osql = original_sqls if original_sqls is not None else self.original_sql_store
-        md = metadata if metadata is not None else self.metadata_store
+        ms = (
+            self.masked_sql_store + masked_sqls
+            if masked_sqls is not None
+            else self.masked_sql_store
+        )
+        osql = (
+            self.original_sql_store + original_sqls
+            if original_sqls is not None
+            else self.original_sql_store
+        )
+        md = (
+            self.metadata_store + metadata
+            if metadata is not None
+            else self.metadata_store
+        )
 
         # Save partial data
         with open(os.path.join(checkpoint_path, "masked_questions.pkl"), "wb") as f:
