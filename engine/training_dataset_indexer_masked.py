@@ -85,7 +85,16 @@ class MaskedTrainingDatasetIndexer:
             llm_client=self.llm_client,
             prompt_manager=self.prompt_manager
         )
-    
+
+    def load_model(self):
+        """Load the embedding model."""
+        from sentence_transformers import SentenceTransformer
+
+        print(f"Loading embedding model: {self.embedding_model_name}...")
+        self.embedding_model = SentenceTransformer(self.embedding_model_name)
+        self.dimension = self.embedding_model.get_sentence_embedding_dimension()
+        print(f"Embedding dimension: {self.dimension}")
+
     def _get_schema_for_db(self, db_id: str) -> Optional[str]:
         """
         Load and format schema for a given database with column types.
@@ -251,29 +260,44 @@ class MaskedTrainingDatasetIndexer:
         except Exception as e:
             print(f"  Warning: Could not save schema cache: {e}")
 
-    def save_checkpoint(self, checkpoint_path: str, processed_count: int, start_index: int = 0):
+    def save_checkpoint(self, checkpoint_path: str, processed_count: int, start_index: int = 0,
+                        masked_questions: Optional[List[str]] = None, original_questions: Optional[List[str]] = None,
+                        masked_sqls: Optional[List[str]] = None, original_sqls: Optional[List[str]] = None,
+                        metadata: Optional[List[Dict[str, Any]]] = None):
         """
         Save a checkpoint that can be resumed later.
-        
+
         Args:
             checkpoint_path: Directory to save checkpoint
             processed_count: Number of entries processed so far
             start_index: Index in dataset where processing stopped
+            masked_questions: List of masked questions (optional, uses self.masked_question_store if not provided)
+            original_questions: List of original questions (optional, uses self.original_question_store if not provided)
+            masked_sqls: List of masked SQLs (optional, uses self.masked_sql_store if not provided)
+            original_sqls: List of original SQLs (optional, uses self.original_sql_store if not provided)
+            metadata: List of metadata (optional, uses self.metadata_store if not provided)
         """
         os.makedirs(checkpoint_path, exist_ok=True)
-        
+
+        # Use provided lists or fall back to instance stores
+        mq = masked_questions if masked_questions is not None else self.masked_question_store
+        oq = original_questions if original_questions is not None else self.original_question_store
+        ms = masked_sqls if masked_sqls is not None else self.masked_sql_store
+        osql = original_sqls if original_sqls is not None else self.original_sql_store
+        md = metadata if metadata is not None else self.metadata_store
+
         # Save partial data
         with open(os.path.join(checkpoint_path, "masked_questions.pkl"), "wb") as f:
-            pickle.dump(self.masked_question_store, f)
-        with open(os.path.join(checkpoint_path, "original_questions.pkl"), "rb") as f:
-            pickle.dump(self.original_question_store, f)
+            pickle.dump(mq, f)
+        with open(os.path.join(checkpoint_path, "original_questions.pkl"), "wb") as f:
+            pickle.dump(oq, f)
         with open(os.path.join(checkpoint_path, "masked_sqls.pkl"), "wb") as f:
-            pickle.dump(self.masked_sql_store, f)
+            pickle.dump(ms, f)
         with open(os.path.join(checkpoint_path, "original_sqls.pkl"), "wb") as f:
-            pickle.dump(self.original_sql_store, f)
+            pickle.dump(osql, f)
         with open(os.path.join(checkpoint_path, "metadata.pkl"), "wb") as f:
-            pickle.dump(self.metadata_store, f)
-        
+            pickle.dump(md, f)
+
         # Save progress
         checkpoint_data = {
             "processed_count": processed_count,
@@ -283,7 +307,7 @@ class MaskedTrainingDatasetIndexer:
         }
         with open(os.path.join(checkpoint_path, "checkpoint.json"), "w") as f:
             json.dump(checkpoint_data, f, indent=2)
-        
+
         print(f"  Checkpoint saved: {processed_count} entries processed (index {start_index})")
     
     @classmethod
@@ -456,7 +480,16 @@ class MaskedTrainingDatasetIndexer:
                         
                         # Save checkpoint periodically
                         if checkpoint_path and len(masked_questions) % checkpoint_every == 0:
-                            self.save_checkpoint(checkpoint_path, len(masked_questions) + resume_index, idx + 1)
+                            self.save_checkpoint(
+                                checkpoint_path, 
+                                len(masked_questions) + resume_index, 
+                                idx + 1,
+                                masked_questions=masked_questions,
+                                original_questions=original_questions,
+                                masked_sqls=masked_sqls,
+                                original_sqls=original_sqls,
+                                metadata=metadata
+                            )
 
         print(f"Extracted and masked {len(masked_questions)} question-SQL pairs")
         return masked_questions, original_questions, masked_sqls, original_sqls, metadata
