@@ -65,10 +65,16 @@ def build_examples_text(examples: List[Dict[str, Any]]) -> str:
     for ex in examples:
         q_text = ex.get('orig_question', ex.get('question', ''))
         sql_text = ex.get('orig_sql', ex.get('sql', ''))
+        # Escape curly braces so they don't interfere with .format()
+        q_text = q_text.replace('{', '{{').replace('}', '}}')
+        sql_text = sql_text.replace('{', '{{').replace('}', '}}')
         parts.append(f"# Question: {q_text}")
         parts.append(f"# Gold SQL: {sql_text}")
+        if 'metadata' in ex and ex['metadata'].get('evidence'):
+            evidence = ex['metadata']['evidence'].replace('{', '{{').replace('}', '}}')
+            parts.append(f"# Evidence: {evidence}")
         parts.append("")
-    
+
     parts.append("</examples>")
     return "\n".join(parts)
 
