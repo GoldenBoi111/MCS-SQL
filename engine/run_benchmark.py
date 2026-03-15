@@ -518,7 +518,13 @@ def run_benchmark(
                 try:
                     selection_response = llm_client.generate(selection_prompt)
                     
-                    # Parse the selection response
+                    sql = None
+                    reasoning = None
+                    
+                    # Debug: Show response preview
+                    print(f"    Sample {sel_idx+1}/{n_selection_samples} - Response length: {len(selection_response)}")
+                    
+                    # Method 1: Try to parse JSON
                     start_idx = selection_response.find("{")
                     if start_idx != -1:
                         brace_count = 0
@@ -547,15 +553,45 @@ def run_benchmark(
                         
                         if end_idx > start_idx:
                             json_str = selection_response[start_idx:end_idx]
-                            parsed = json.loads(json_str)
-                            sql = parsed.get("sql", "")
-                            reasoning = parsed.get("reasoning", "")
+                            # Remove trailing code fence if present
+                            if json_str.rstrip().endswith("```"):
+                                json_str = json_str.rstrip()[:-3]
                             
-                            if sql:
-                                selection_votes.append({"sql": sql, "reasoning": reasoning})
-                                print(f"    Sample {sel_idx+1}/{n_selection_samples}: {sql[:100]}...")
+                            try:
+                                parsed = json.loads(json_str)
+                                sql = parsed.get("sql", "")
+                                reasoning = parsed.get("reasoning", "")
+                            except json.JSONDecodeError as je:
+                                # Method 2: Regex fallback to extract SQL from broken JSON
+                                import re
+                                # Try to find "sql": "..." pattern, handling multiline
+                                sql_match = re.search(r'"sql"\s*:\s*"((?:[^"\\]|\\.)*)"', selection_response, re.DOTALL)
+                                if sql_match:
+                                    sql = sql_match.group(1)
+                                    # Unescape JSON string
+                                    sql = sql.replace('\\"', '"').replace('\\n', '\n').replace('\\\\', '\\')
+                                reasoning_match = re.search(r'"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"', selection_response, re.DOTALL)
+                                if reasoning_match:
+                                    reasoning = reasoning_match.group(1).replace('\\"', '"')
+                                
+                                if sql:
+                                    print(f"      Extracted via regex (JSON error: {je})")
+                                else:
+                                    print(f"      Could not extract SQL (JSON error: {je})")
+                                    print(f"      JSON attempt: {json_str[:150]}...")
+                        else:
+                            print(f"      Could not find matching braces in response")
+                            print(f"      Response preview: {selection_response[:200]}...")
+                    else:
+                        print(f"      No JSON object found in response")
+                        print(f"      Response preview: {selection_response[:200]}...")
+                    
+                    if sql:
+                        selection_votes.append({"sql": sql, "reasoning": reasoning or ""})
+                        print(f"      SQL: {sql[:100]}...")
                 except Exception as e:
-                    print(f"    Sample {sel_idx+1}/{n_selection_samples} error: {e}")
+                    print(f"    Sample {sel_idx+1}/{n_selection_samples} outer error: {e}")
+                    print(f"    Response: {selection_response[:200]}...")
             
             # Majority voting on selection
             if selection_votes:
