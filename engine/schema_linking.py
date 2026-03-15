@@ -114,9 +114,9 @@ class TransformersLLMClient:
                 stopping_criteria=stopping_criteria,
             )
 
-        response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        # Remove the prompt from the response
-        response = response[len(prompt) :]
+        # Decode only the generated tokens (not the prompt)
+        input_length = inputs["input_ids"].shape[1]
+        response = self.tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
         return response.strip()
 
 

@@ -230,8 +230,8 @@ def run_benchmark(
             
             for gen_idx in range(20):
                 try:
-                    # Use stop sequences to prevent multiple JSON objects
-                    response = llm_client.generate(prompt, stop_sequences=["```json", "```", "###"])
+                    # Generate without stop sequences (rely on robust JSON parsing instead)
+                    response = llm_client.generate(prompt)
                     print(f"      Gen {gen_idx+1}/20 - Response length: {len(response)}")
                     
                     # Extract SQL from JSON - ignore everything that's not JSON
