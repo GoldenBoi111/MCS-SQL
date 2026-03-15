@@ -68,12 +68,13 @@ class TransformersLLMClient:
             self.model = self.model.to(device)
         print(f"Model loaded successfully on {device}")
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, stop_sequences: Optional[List[str]] = None) -> str:
         """
         Generate response from the model.
 
         Args:
             prompt: Input prompt string
+            stop_sequences: Optional list of sequences to stop generation at
 
         Returns:
             Generated response string
@@ -84,6 +85,25 @@ class TransformersLLMClient:
         if self.device == "cuda":
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
+        # Prepare stop sequences for transformers
+        stopping_criteria = None
+        if stop_sequences:
+            from transformers import StoppingCriteriaList, StoppingCriteria
+            import re
+
+            class StopOnSequence(StoppingCriteria):
+                def __init__(self, sequences, tokenizer):
+                    self.sequences = sequences
+                    self.tokenizer = tokenizer
+
+                def __call__(self, input_ids, scores, **kwargs):
+                    decoded = self.tokenizer.decode(input_ids[0], skip_special_tokens=True)
+                    return any(seq in decoded for seq in self.sequences)
+
+            stopping_criteria = StoppingCriteriaList([
+                StopOnSequence(stop_sequences, self.tokenizer)
+            ])
+
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
@@ -91,6 +111,7 @@ class TransformersLLMClient:
                 temperature=self.temperature,
                 do_sample=self.temperature > 0,
                 pad_token_id=self.tokenizer.eos_token_id,
+                stopping_criteria=stopping_criteria,
             )
 
         response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
@@ -311,6 +332,7 @@ Your answer should strictly follow the following json format.
 
             if start_idx != -1 and end_idx > start_idx:
                 json_str = response[start_idx:end_idx]
+                print(f"  [DEBUG] JSON attempt ({len(json_str)} chars): {json_str[:200]}...")
                 result = json.loads(json_str)
 
                 if task_type == "table":
@@ -324,6 +346,7 @@ Your answer should strictly follow the following json format.
                         "columns": result.get("columns", []),
                     }
         except (json.JSONDecodeError, Exception) as e:
+            print(f"  [DEBUG] Full response: {response[:500]}...")
             print(f"Error parsing LLM response: {e}")
 
         return {"reasoning": "", "tables" if task_type == "table" else "columns": []}

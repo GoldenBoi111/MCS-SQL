@@ -177,13 +177,17 @@ def run_benchmark(
         ]
         
         # 3. Build 5 Prompt Variations
+        print(f"  Standard examples: {len(std_examples)}, Masked examples: {len(msk_examples)}")
+        print(f"  std_examples[0]: {std_examples[0] if std_examples else 'None'}")
+        print(f"  msk_examples[0]: {msk_examples[0] if msk_examples else 'None'}")
+        
         # 1 MASKED only
         prompt_variations = []
-        prompt_variations.append(("masked_only", msk_examples[:10])) # 10 examples per prompt 
-        
+        prompt_variations.append(("masked_only", msk_examples[:10])) # 10 examples per prompt
+
         # 1 STANDARD only
         prompt_variations.append(("standard_only", std_examples[:10]))
-        
+
         # 3 MIXED
         for i in range(3):
             mixed = std_examples[:5] + msk_examples[:5]
@@ -195,6 +199,10 @@ def run_benchmark(
                 mixed += random.sample(rem_pool, min(10 - len(mixed), len(rem_pool)))
             random.shuffle(mixed)
             prompt_variations.append((f"mixed_{i}", mixed))
+        
+        print(f"  Built {len(prompt_variations)} prompt variations")
+        for pname, pex in prompt_variations:
+            print(f"    {pname}: {len(pex)} examples")
             
         # 4. Generate 100 Queries (5 prompts * 20 generations)
         print("  Generating SQL candidates (5 x 20)...")
@@ -215,26 +223,54 @@ def run_benchmark(
             
             for gen_idx in range(20):
                 try:
-                    response = llm_client.generate(prompt)
+                    # Use stop sequences to prevent multiple JSON objects
+                    response = llm_client.generate(prompt, stop_sequences=["```json", "```", "###"])
                     print(f"      Gen {gen_idx+1}/20 - Response length: {len(response)}")
                     
                     # Extract SQL from JSON
-                    start_idx = response.find("{")
-                    end_idx = response.rfind("}") + 1
                     sql_query = ""
-                    if start_idx != -1 and end_idx > start_idx:
-                        json_str = response[start_idx:end_idx]
-                        print(f"      Extracted JSON: {json_str[:200]}...")
-                        try:
-                            parsed = json.loads(json_str)
-                            sql_query = parsed.get("sql", "")
-                            print(f"      Parsed SQL: {sql_query[:100] if sql_query else 'None'}...")
-                        except json.JSONDecodeError as je:
-                            print(f"      JSON parse error: {je}")
-                            print(f"      Full JSON attempt: {json_str}")
+                    
+                    # Method 1: Try to find and parse first complete JSON object
+                    start_idx = response.find("{")
+                    if start_idx != -1:
+                        # Find matching closing brace by counting braces
+                        brace_count = 0
+                        end_idx = -1
+                        in_string = False
+                        escape_next = False
+                        
+                        for i, char in enumerate(response[start_idx:], start_idx):
+                            if escape_next:
+                                escape_next = False
+                                continue
+                            if char == '\\' and in_string:
+                                escape_next = True
+                                continue
+                            if char == '"' and not escape_next:
+                                in_string = not in_string
+                                continue
+                            if not in_string:
+                                if char == "{":
+                                    brace_count += 1
+                                elif char == "}":
+                                    brace_count -= 1
+                                    if brace_count == 0:
+                                        end_idx = i + 1
+                                        break
+                        
+                        if end_idx > start_idx:
+                            json_str = response[start_idx:end_idx]
+                            print(f"      Extracted JSON ({len(json_str)} chars): {json_str[:200]}...")
+                            try:
+                                parsed = json.loads(json_str)
+                                sql_query = parsed.get("sql", "")
+                                print(f"      Parsed SQL: {sql_query[:100] if sql_query else 'None'}...")
+                            except json.JSONDecodeError as je:
+                                print(f"      JSON parse error: {je}")
+                                print(f"      Full JSON attempt: {json_str}")
 
                     if not sql_query:
-                        # Regex fallback
+                        # Method 2: Regex fallback for SQL
                         import re
                         match = re.search(r'SELECT.*?(?:;|$)', response, re.IGNORECASE | re.DOTALL)
                         if match:
