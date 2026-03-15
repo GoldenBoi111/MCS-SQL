@@ -218,11 +218,12 @@ def run_benchmark(
             print(f"    Prompt type: {p_name}")
             ex_text = build_examples_text(ex_list)
 
-            prompt = prompt_template.format(
-                examples=ex_text,
-                schema_text=schema_text,
-                question=question,
-                evidence=evidence
+            prompt = (
+                prompt_template
+                .replace("{examples}", ex_text)
+                .replace("{schema_text}", schema_text)
+                .replace("{question}", question)
+                .replace("{evidence}", evidence)
             )
             
             print(f"    Prompt preview: {prompt[:300]}...")
