@@ -326,12 +326,49 @@ Your answer should strictly follow the following json format.
             Parsed dictionary with reasoning and tables/columns
         """
         try:
-            # Try to find JSON in response
+            # Remove markdown code fences if present
+            response = response.strip()
+            if response.startswith("```json"):
+                response = response[7:]
+            elif response.startswith("```"):
+                response = response[3:]
+            
+            # Find the JSON object - extract only the JSON, ignore everything else
             start_idx = response.find("{")
-            end_idx = response.rfind("}") + 1
-
-            if start_idx != -1 and end_idx > start_idx:
+            if start_idx == -1:
+                return {"reasoning": "", "tables" if task_type == "table" else "columns": []}
+            
+            # Find matching closing brace by counting braces, ignoring content in strings
+            brace_count = 0
+            end_idx = -1
+            in_string = False
+            escape_next = False
+            
+            for i, char in enumerate(response[start_idx:], start_idx):
+                if escape_next:
+                    escape_next = False
+                    continue
+                if char == '\\' and in_string:
+                    escape_next = True
+                    continue
+                if char == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                if not in_string:
+                    if char == "{":
+                        brace_count += 1
+                    elif char == "}":
+                        brace_count -= 1
+                        if brace_count == 0:
+                            end_idx = i + 1
+                            break
+            
+            if end_idx > start_idx:
                 json_str = response[start_idx:end_idx]
+                # Remove trailing code fence if present
+                if json_str.rstrip().endswith("```"):
+                    json_str = json_str.rstrip()[:-3]
+                
                 print(f"  [DEBUG] JSON attempt ({len(json_str)} chars): {json_str[:200]}...")
                 result = json.loads(json_str)
 

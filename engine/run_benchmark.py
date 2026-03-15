@@ -227,19 +227,26 @@ def run_benchmark(
                     response = llm_client.generate(prompt, stop_sequences=["```json", "```", "###"])
                     print(f"      Gen {gen_idx+1}/20 - Response length: {len(response)}")
                     
-                    # Extract SQL from JSON
+                    # Extract SQL from JSON - ignore everything that's not JSON
                     sql_query = ""
                     
-                    # Method 1: Try to find and parse first complete JSON object
-                    start_idx = response.find("{")
+                    # Strip markdown code fences
+                    response_stripped = response.strip()
+                    if response_stripped.startswith("```json"):
+                        response_stripped = response_stripped[7:]
+                    elif response_stripped.startswith("```"):
+                        response_stripped = response_stripped[3:]
+                    
+                    # Find the first { and extract only the JSON object
+                    start_idx = response_stripped.find("{")
                     if start_idx != -1:
-                        # Find matching closing brace by counting braces
+                        # Find matching closing brace by counting braces, ignoring content in strings
                         brace_count = 0
                         end_idx = -1
                         in_string = False
                         escape_next = False
                         
-                        for i, char in enumerate(response[start_idx:], start_idx):
+                        for i, char in enumerate(response_stripped[start_idx:], start_idx):
                             if escape_next:
                                 escape_next = False
                                 continue
@@ -259,7 +266,11 @@ def run_benchmark(
                                         break
                         
                         if end_idx > start_idx:
-                            json_str = response[start_idx:end_idx]
+                            json_str = response_stripped[start_idx:end_idx]
+                            # Remove trailing code fence if present
+                            if json_str.rstrip().endswith("```"):
+                                json_str = json_str.rstrip()[:-3]
+                            
                             print(f"      Extracted JSON ({len(json_str)} chars): {json_str[:200]}...")
                             try:
                                 parsed = json.loads(json_str)
