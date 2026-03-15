@@ -79,6 +79,50 @@ def build_examples_text(examples: List[Dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
+def get_sample_table_contents(db_path: str, tables: List[str], sample_size: int = 3) -> str:
+    """
+    Get sample contents from each table in CSV format.
+    
+    Args:
+        db_path: Path to SQLite database
+        tables: List of table names to sample
+        sample_size: Number of rows to sample from each table
+        
+    Returns:
+        Formatted string with sample table contents
+    """
+    parts = []
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        for table in tables:
+            try:
+                # Get sample rows
+                cursor.execute(f"SELECT * FROM {table} LIMIT {sample_size}")
+                rows = cursor.fetchall()
+                
+                # Get column names
+                column_names = [desc[0] for desc in cursor.description]
+                
+                # Format as CSV-like table
+                parts.append(f"Table: {table}")
+                parts.append(" | ".join(column_names))
+                parts.append("-" * 50)
+                for row in rows:
+                    parts.append(" | ".join(str(val) if val is not None else "NULL" for val in row))
+                parts.append("")
+            except Exception as e:
+                parts.append(f"Table: {table} (Error sampling: {e})")
+                parts.append("")
+        
+        conn.close()
+    except Exception as e:
+        parts.append(f"Error connecting to database: {e}")
+    
+    return "\n".join(parts)
+
+
 def run_benchmark(
     benchmark_path: str,
     db_root: str,
@@ -123,11 +167,14 @@ def run_benchmark(
     
     # Also need literal masker to mask queries prior to searching masked index
     literal_masker = LiteralMasker(llm_client=llm_client)
-    
-    # Load prompt template
+
+    # Load prompt templates
     with open(config.PROMPTS_DIR / "SQL_generation.txt", "r") as f:
         prompt_template = f.read()
-        
+    
+    with open(config.PROMPTS_DIR / "SQL_selection.txt", "r") as f:
+        selection_template = f.read()
+
     questions = load_benchmark(benchmark_path)
     if limit:
         questions = questions[:limit]
@@ -214,6 +261,10 @@ def run_benchmark(
         print("  Generating SQL candidates (5 x 20)...")
         generated_candidates = []
 
+        # Get sample table contents for the linked schema
+        sample_contents = get_sample_table_contents(db_path, list(linking_res.tables), sample_size=3)
+        print(f"  Sample table contents:\n{sample_contents[:500]}...")
+
         for p_name, ex_list in prompt_variations:
             print(f"    Prompt type: {p_name}")
             ex_text = build_examples_text(ex_list)
@@ -222,10 +273,11 @@ def run_benchmark(
                 prompt_template
                 .replace("{examples}", ex_text)
                 .replace("{schema_text}", schema_text)
+                .replace("{sample_contents}", sample_contents)
                 .replace("{question}", question)
                 .replace("{evidence}", evidence)
             )
-            
+
             print(f"    Prompt preview: {prompt[:300]}...")
             
             for gen_idx in range(20):
@@ -425,11 +477,113 @@ def run_benchmark(
         
         # Sort by confidence descending
         high_conf_sqls.sort(key=lambda x: x["confidence"], reverse=True)
-        
+
         print("\n  Top 5 High-Confidence Queries:")
         for i, q_res in enumerate(high_conf_sqls[:5], 1):
             print(f"    {i}. [Conf: {q_res['confidence']:.2f}, Time: {q_res['best_exec_time']:.3f}s] {q_res['sql'][:150]}...")
+
+        # SQL Selection Phase: Use LLM to select the best SQL from all high-confidence candidates
+        # Following the paper: present candidates as multiple-choice, sample n responses, majority vote
+        print("\n  Running SQL Selection Phase...")
+        # Use ALL candidates that pass the confidence threshold (> 0.2), not just top 3
+        high_conf_candidates = [c for c in high_conf_sqls if c['confidence'] > 0.2]
+        
+        selected_sql = None
+        selection_reasoning = None
+        
+        if len(high_conf_candidates) > 0:
+            # Format candidate SQLs as numbered list (multiple-choice format)
+            # Max 5 can pass 0.2 threshold (mathematically), typically 1-3
+            selection_candidates = high_conf_candidates[:5]
+            candidate_sqls_text = "\n".join(
+                f"{i+1}. {c['sql']}" for i, c in enumerate(selection_candidates)
+            )
             
+            selection_prompt = (
+                selection_template
+                .replace("{schema_text}", schema_text)
+                .replace("{question}", question)
+                .replace("{evidence}", evidence)
+                .replace("{candidate_sqls}", candidate_sqls_text)
+            )
+            
+            print(f"    Selection prompt: {selection_prompt[:300]}...")
+            print(f"    Candidates (confidence > 0.2): {len(selection_candidates)}")
+            
+            # Sample n=20 responses from LLM for majority voting
+            n_selection_samples = 20
+            selection_votes = []
+            
+            for sel_idx in range(n_selection_samples):
+                try:
+                    selection_response = llm_client.generate(selection_prompt)
+                    
+                    # Parse the selection response
+                    start_idx = selection_response.find("{")
+                    if start_idx != -1:
+                        brace_count = 0
+                        end_idx = -1
+                        in_string = False
+                        escape_next = False
+                        
+                        for i, char in enumerate(selection_response[start_idx:], start_idx):
+                            if escape_next:
+                                escape_next = False
+                                continue
+                            if char == '\\' and in_string:
+                                escape_next = True
+                                continue
+                            if char == '"' and not escape_next:
+                                in_string = not in_string
+                                continue
+                            if not in_string:
+                                if char == "{":
+                                    brace_count += 1
+                                elif char == "}":
+                                    brace_count -= 1
+                                    if brace_count == 0:
+                                        end_idx = i + 1
+                                        break
+                        
+                        if end_idx > start_idx:
+                            json_str = selection_response[start_idx:end_idx]
+                            parsed = json.loads(json_str)
+                            sql = parsed.get("sql", "")
+                            reasoning = parsed.get("reasoning", "")
+                            
+                            if sql:
+                                selection_votes.append({"sql": sql, "reasoning": reasoning})
+                                print(f"    Sample {sel_idx+1}/{n_selection_samples}: {sql[:100]}...")
+                except Exception as e:
+                    print(f"    Sample {sel_idx+1}/{n_selection_samples} error: {e}")
+            
+            # Majority voting on selection
+            if selection_votes:
+                sql_counts = Counter(vote["sql"] for vote in selection_votes)
+                most_common_sql, vote_count = sql_counts.most_common(1)[0]
+                
+                # Get reasoning from the vote that selected this SQL
+                selected_reasoning = next(
+                    (vote["reasoning"] for vote in selection_votes if vote["sql"] == most_common_sql),
+                    ""
+                )
+                
+                selected_sql = most_common_sql
+                selection_reasoning = selected_reasoning
+                
+                print(f"    Majority vote: {selected_sql[:150]}... ({vote_count}/{len(selection_votes)} votes)")
+                representative_sql = selected_sql
+            else:
+                print("    No valid selection responses, keeping majority vote result")
+        else:
+            print("    No high-confidence candidates (confidence > 0.2) for selection")
+
+        # Re-evaluate correctness with the selected SQL
+        if selected_sql:
+            selected_success, selected_res, _ = execute_sql_with_timeout(db_path, selected_sql)
+            is_correct = (gt_success and selected_res == gt_res)
+            print(f"    Selected SQL correctness: {'CORRECT' if is_correct else 'INCORRECT'}")
+
         results_detail.append({
             "question_id": q.get("question_id", q_idx),
             "question": question,
@@ -439,6 +593,11 @@ def run_benchmark(
             "is_correct": is_correct,
             "winner_confidence": winner_confidence,
             "high_confidence_alternatives": high_conf_sqls,
+            "selection": {
+                "selected_sql": selected_sql if len(high_conf_candidates) > 0 else None,
+                "reasoning": selection_reasoning if len(high_conf_candidates) > 0 else None,
+                "candidates_count": len(high_conf_candidates)
+            },
             "metrics": {
                 "generated": len(generated_candidates),
                 "execution_errors": execution_errors,

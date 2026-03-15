@@ -7,6 +7,9 @@ sqlite SQL query for the question.
 ### SQLite SQL tables, with their properties:
 {schema_text}
 
+### Sample Table Contents:
+{sample_contents}
+
 ### Question:
 {question}
 
@@ -16,10 +19,10 @@ sqlite SQL query for the question.
 You need to not only create the SQL, but also provide the detailed reasoning steps
 required to create the SQL. Your answer must be a SINGLE valid JSON object with this exact structure:
 
-{
+{{
     "reasoning": "The reasoning steps for generating SQL.",
     "sql": "The final generated SQL."
-}
+}}
 
 IMPORTANT: Output ONLY the JSON object. Do not include any other text, markdown, or code fences.
 
