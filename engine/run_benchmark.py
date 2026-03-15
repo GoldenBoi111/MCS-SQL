@@ -199,10 +199,11 @@ def run_benchmark(
         # 4. Generate 100 Queries (5 prompts * 20 generations)
         print("  Generating SQL candidates (5 x 20)...")
         generated_candidates = []
-        
+
         for p_name, ex_list in prompt_variations:
+            print(f"    Prompt type: {p_name}")
             ex_text = build_examples_text(ex_list)
-            
+
             prompt = prompt_template.format(
                 examples=ex_text,
                 schema_text=schema_text,
@@ -210,33 +211,48 @@ def run_benchmark(
                 evidence=evidence
             )
             
+            print(f"    Prompt preview: {prompt[:300]}...")
+            
             for gen_idx in range(20):
                 try:
                     response = llm_client.generate(prompt)
+                    print(f"      Gen {gen_idx+1}/20 - Response length: {len(response)}")
+                    
                     # Extract SQL from JSON
                     start_idx = response.find("{")
                     end_idx = response.rfind("}") + 1
                     sql_query = ""
                     if start_idx != -1 and end_idx > start_idx:
                         json_str = response[start_idx:end_idx]
-                        parsed = json.loads(json_str)
-                        sql_query = parsed.get("sql", "")
-                    
+                        print(f"      Extracted JSON: {json_str[:200]}...")
+                        try:
+                            parsed = json.loads(json_str)
+                            sql_query = parsed.get("sql", "")
+                            print(f"      Parsed SQL: {sql_query[:100] if sql_query else 'None'}...")
+                        except json.JSONDecodeError as je:
+                            print(f"      JSON parse error: {je}")
+                            print(f"      Full JSON attempt: {json_str}")
+
                     if not sql_query:
                         # Regex fallback
                         import re
                         match = re.search(r'SELECT.*?(?:;|$)', response, re.IGNORECASE | re.DOTALL)
                         if match:
                             sql_query = match.group(0).strip()
-                            
+                            print(f"      Regex extracted SQL: {sql_query[:100]}...")
+
                     if sql_query:
                         generated_candidates.append({
                             "sql": sql_query,
                             "prompt_type": p_name,
                             "gen_idx": gen_idx
                         })
+                    else:
+                        print(f"      No SQL extracted!")
+                        print(f"      Full response: {response}")
                 except Exception as e:
                     print(f"    Generation error: {e}")
+                    print(f"    Raw response: {response[:500]}...")
                     
         print(f"  Generated {len(generated_candidates)} valid SQL candidates")
         
