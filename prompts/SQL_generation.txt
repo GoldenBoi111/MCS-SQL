@@ -1,5 +1,9 @@
 ### Given a database schema, question, and knowledge evidence, generate the correct
 sqlite SQL query for the question.
+
+### Relevant examples from index:
+{examples}
+
 ### SQLite SQL tables, with their properties:
 {schema_text}
 
