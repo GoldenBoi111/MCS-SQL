@@ -61,6 +61,10 @@ class TransformersLLMClient:
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         
         # Load model with FP16 for faster inference on GPU
+        # Use expandable_segments to avoid memory fragmentation
+        import os
+        os.environ['PYTORCH_ALLOC_CONF'] = 'expandable_segments:True'
+        
         model_kwargs = {
             "trust_remote_code": True,
             "torch_dtype": torch.float16,
@@ -228,69 +232,82 @@ class MultiModelManager:
                 temperature=temperature,
             )
             self.models.append(model)
+            
+            # Clear cache after each model load to prevent fragmentation
+            import gc
+            import torch
+            gc.collect()
+            torch.cuda.empty_cache()
         
         print(f"All {num_copies} model copies loaded successfully")
+        print(f"  Estimated VRAM usage: ~{num_copies * 14} GB")
     
-    def generate_parallel(self, prompts: List[str], stop_sequences: Optional[List[str]] = None) -> List[str]:
+    def generate_parallel(self, prompts: List[str], stop_sequences: Optional[List[str]] = None, batch_size: int = 8) -> List[str]:
         """
         Generate responses by distributing prompts across all model copies.
-        Each model processes a batch of prompts in parallel.
-        
+        Each model processes prompts in smaller batches to avoid OOM.
+
         Args:
             prompts: List of prompts to process
             stop_sequences: Optional stop sequences
-            
+            batch_size: Max prompts per batch per model (default 8)
+
         Returns:
             List of generated responses (same order as input prompts)
         """
         if not prompts:
             return []
-        
+
         n_prompts = len(prompts)
         n_models = len(self.models)
-        
+
         # Distribute prompts across models (round-robin for load balancing)
         model_prompts: List[List[tuple]] = [[] for _ in range(n_models)]
         for i, prompt in enumerate(prompts):
             model_idx = i % n_models
             model_prompts[model_idx].append((i, prompt))
-        
+
         # Generate on each model in parallel
         import threading
         results: Dict[int, str] = {}
         errors: List[Exception] = []
-        
+
         def worker(model_idx: int):
             try:
                 model = self.models[model_idx]
                 indices_prompts = model_prompts[model_idx]
-                
+
                 if indices_prompts:
-                    batch_prompts = [p for _, p in indices_prompts]
-                    batch_results = model.generate_batch(batch_prompts, stop_sequences)
-                    
-                    for (idx, _), result in zip(indices_prompts, batch_results):
-                        results[idx] = result
+                    # Process in smaller batches to avoid OOM
+                    for batch_start in range(0, len(indices_prompts), batch_size):
+                        batch_end = min(batch_start + batch_size, len(indices_prompts))
+                        batch = indices_prompts[batch_start:batch_end]
+                        
+                        batch_prompts = [p for _, p in batch]
+                        batch_results = model.generate_batch(batch_prompts, stop_sequences)
+
+                        for (idx, _), result in zip(batch, batch_results):
+                            results[idx] = result
             except Exception as e:
                 errors.append(e)
-        
+
         # Start all workers
         threads = []
         for i in range(n_models):
             t = threading.Thread(target=worker, args=(i,))
             threads.append(t)
             t.start()
-        
+
         # Wait for all to complete
         for t in threads:
             t.join()
-        
+
         # Check for errors
         if errors:
             print(f"Warning: {len(errors)} model errors during parallel generation")
             for e in errors[:3]:  # Show first 3 errors
                 print(f"  Error: {e}")
-        
+
         # Reconstruct results in original order
         responses = [results.get(i, "") for i in range(n_prompts)]
         return responses
@@ -606,6 +623,7 @@ Your answer should strictly follow the following json format.
     ) -> Tuple[List[str], str]:
         """
         Perform table linking using shuffled prompts and union of all results.
+        Uses batch generation for speed when MultiModelManager is available.
 
         Args:
             schema: Database schema dictionary
@@ -618,6 +636,10 @@ Your answer should strictly follow the following json format.
         results = []
         self._current_schema = schema
 
+        # Collect all prompts first
+        all_prompts = []
+        prompt_configs = []  # Track (shuffle_idx, sample_idx) for each prompt
+        
         for i in range(self.pt):
             # Shuffle schema order for diversity
             shuffled_schema = self.shuffle_schema_order(schema)
@@ -625,15 +647,30 @@ Your answer should strictly follow the following json format.
 
             # Build prompt
             prompt = self.build_table_linking_prompt(schema_text, question, evidence)
-
+            
             # Generate n outputs
-            for _ in range(self.n):
+            for j in range(self.n):
+                all_prompts.append(prompt)
+                prompt_configs.append((i, j))
+
+        # Check if we have batch generation capability
+        if hasattr(self.llm_client, 'generate_parallel'):
+            # Use parallel batch generation (MultiModelManager)
+            print(f"    Table linking: generating {len(all_prompts)} responses in parallel...")
+            all_responses = self.llm_client.generate_parallel(all_prompts, stop_sequences=None, batch_size=8)
+            
+            # Parse all responses
+            for idx, response in enumerate(all_responses):
+                parsed = self.parse_llm_response(response, "table")
+                results.append(parsed)
+        else:
+            # Sequential generation (fallback)
+            print(f"    Table linking: generating {len(all_prompts)} responses sequentially...")
+            for idx, prompt in enumerate(all_prompts):
                 if self.llm_client:
                     response = self.llm_client.generate(prompt)
                 else:
-                    # Placeholder for testing - replace with actual LLM call
                     response = self._mock_llm_call(prompt, "table", schema)
-
                 parsed = self.parse_llm_response(response, "table")
                 results.append(parsed)
 
@@ -651,6 +688,7 @@ Your answer should strictly follow the following json format.
     ) -> Tuple[List[str], str]:
         """
         Perform column linking using shuffled prompts and union of all results.
+        Uses batch generation for speed when MultiModelManager is available.
 
         Args:
             schema: Database schema dictionary
@@ -663,6 +701,9 @@ Your answer should strictly follow the following json format.
         """
         results = []
 
+        # Collect all prompts first
+        all_prompts = []
+        
         for i in range(self.pc):
             # Shuffle table order for diversity
             shuffled_schema = self.shuffle_schema_order(schema, selected_tables)
@@ -674,15 +715,29 @@ Your answer should strictly follow the following json format.
             prompt = self.build_column_linking_prompt(
                 schema_text, question, selected_tables, evidence
             )
-
+            
             # Generate n outputs
-            for _ in range(self.n):
+            for j in range(self.n):
+                all_prompts.append(prompt)
+
+        # Check if we have batch generation capability
+        if hasattr(self.llm_client, 'generate_parallel'):
+            # Use parallel batch generation (MultiModelManager)
+            print(f"    Column linking: generating {len(all_prompts)} responses in parallel...")
+            all_responses = self.llm_client.generate_parallel(all_prompts, stop_sequences=None, batch_size=8)
+            
+            # Parse all responses
+            for response in all_responses:
+                parsed = self.parse_llm_response(response, "column")
+                results.append(parsed)
+        else:
+            # Sequential generation (fallback)
+            print(f"    Column linking: generating {len(all_prompts)} responses sequentially...")
+            for prompt in all_prompts:
                 if self.llm_client:
                     response = self.llm_client.generate(prompt)
                 else:
-                    # Placeholder for testing - replace with actual LLM call
                     response = self._mock_llm_call(prompt, "column", schema)
-
                 parsed = self.parse_llm_response(response, "column")
                 results.append(parsed)
 

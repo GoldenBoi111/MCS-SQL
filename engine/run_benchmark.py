@@ -133,14 +133,15 @@ def run_benchmark(
     
     config = Config()
 
-    # Load 4 model copies for parallel batch generation on A100
-    print("Loading Multi-Model Manager (4 copies for parallel generation)...")
+    # Load 2 model copies for parallel batch generation on A100
+    # (2 copies fit in 80 GB VRAM with room for overhead)
+    print("Loading Multi-Model Manager (2 copies for parallel generation)...")
     multi_model = MultiModelManager(
         model_name=config.LLM_MODEL_NAME,
         device=config.LLM_DEVICE,
         max_new_tokens=512,
         temperature=0.3,  # Balance between diversity and speed
-        num_copies=4,
+        num_copies=2,
     )
     
     # Use first model for schema linker (single-threaded)
@@ -292,9 +293,9 @@ def run_benchmark(
         
         print(f"  Built {len(all_prompts)} prompts for parallel generation...")
         
-        # Generate all 100 responses in parallel using 4 model copies
-        print("  Running parallel batch generation across 4 models...")
-        all_responses = multi_model.generate_parallel(all_prompts, stop_sequences=None)
+        # Generate all 100 responses in parallel using 2 model copies with batch size 8
+        print("  Running parallel batch generation across 2 models (batch_size=8)...")
+        all_responses = multi_model.generate_parallel(all_prompts, stop_sequences=None, batch_size=8)
         
         # Parse responses and extract SQL
         print("  Parsing responses...")
@@ -533,8 +534,8 @@ def run_benchmark(
             # Create 20 copies of the selection prompt
             selection_prompts = [selection_prompt] * n_selection_samples
             
-            # Generate all 20 responses in parallel
-            selection_responses = multi_model.generate_parallel(selection_prompts, stop_sequences=None)
+            # Generate all 20 responses in parallel (batch_size=8)
+            selection_responses = multi_model.generate_parallel(selection_prompts, stop_sequences=None, batch_size=8)
             
             # Parse all responses
             print(f"    Parsing {len(selection_responses)} selection responses...")
