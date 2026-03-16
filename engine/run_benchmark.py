@@ -884,8 +884,11 @@ def generate_detailed_report(results: List[Dict], output_dir: str):
     selection_made = sum(1 for r in results if r.get("selection", {}).get("selected_sql") is not None)
     print(f"\n🎯 SQL SELECTION PHASE STATISTICS")
     print("-"*100)
-    print(f"  Selection Made:          {selection_made} ({selection_made/total*100:.1f}%)")
-    print(f"  Majority Vote Used:      {total - selection_made} ({(total - selection_made)/total*100:.1f}%)")
+    if total > 0:
+        print(f"  Selection Made:          {selection_made} ({selection_made/total*100:.1f}%)")
+        print(f"  Majority Vote Used:      {total - selection_made} ({(total - selection_made)/total*100:.1f}%)")
+    else:
+        print(f"  No results to report")
     
     # Save detailed report to file
     report_data = {
@@ -955,6 +958,9 @@ def run_multi_gpu_benchmark(
     """
     import torch
     import multiprocessing as mp
+    
+    # CRITICAL: Use 'spawn' method for CUDA compatibility
+    mp.set_start_method('spawn', force=True)
     
     # Setup GPUs
     gpu_ids = setup_multi_gpu(num_gpus)
