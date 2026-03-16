@@ -145,14 +145,16 @@ def run_benchmark(
     )
     
     # Use first model for schema linker (single-threaded)
+    # But pass multi_model for batch generation capability
     llm_client = multi_model.models[0]
-
+    
     # Setup schema linker with 20 iterations for majority voting
+    # Pass the multi_model so it can use generate_parallel
     linker = SchemaLinker(
         pt=config.TABLE_LINKING_ITERATIONS,
         pc=config.COLUMN_LINKING_ITERATIONS,
         n=20,  # 20 parallel outputs per iteration for robust schema linking
-        llm_client=llm_client
+        llm_client=multi_model,  # Use multi_model for batch generation
     )
     
     # Load Indexes

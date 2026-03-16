@@ -654,6 +654,9 @@ Your answer should strictly follow the following json format.
                 prompt_configs.append((i, j))
 
         # Check if we have batch generation capability
+        print(f"    DEBUG: llm_client type = {type(self.llm_client).__name__}")
+        print(f"    DEBUG: has generate_parallel = {hasattr(self.llm_client, 'generate_parallel')}")
+        
         if hasattr(self.llm_client, 'generate_parallel'):
             # Use parallel batch generation (MultiModelManager)
             print(f"    Table linking: generating {len(all_prompts)} responses in parallel...")
