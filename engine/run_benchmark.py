@@ -792,9 +792,12 @@ def generate_detailed_report(results: List[Dict], output_dir: str):
     print(f"\n🔧 GENERATION STATISTICS")
     print("-"*100)
     print(f"  Total SQL Generated:     {total_generated}")
-    print(f"  Valid Executions:        {total_valid} ({total_valid/total_generated*100:.1f}% success rate)")
-    print(f"  Execution Errors:        {total_errors} ({total_errors/total_generated*100:.1f}%)")
-    print(f"  Unique SQL Variations:   {unique_sqls} (avg {unique_sqls/total:.1f} per question)")
+    if total_generated > 0:
+        print(f"  Valid Executions:        {total_valid} ({total_valid/total_generated*100:.1f}% success rate)")
+        print(f"  Execution Errors:        {total_errors} ({total_errors/total_generated*100:.1f}%)")
+        print(f"  Unique SQL Variations:   {unique_sqls} (avg {unique_sqls/total:.1f} per question)")
+    else:
+        print(f"  No SQL generated (check for errors)")
     
     # Confidence Statistics
     confidences = [r.get("winner_confidence", 0) for r in results]
@@ -992,9 +995,10 @@ def run_multi_gpu_benchmark(
     def gpu_worker(gpu_id, benchmark_path, db_root, output_dir, questions_chunk):
         """Worker function to run benchmark on a specific GPU."""
         import os
+        import gc
         # Set CUDA visible device BEFORE any torch operations
         os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
-        
+
         # Clear GPU memory
         torch.cuda.empty_cache()
         gc.collect()
