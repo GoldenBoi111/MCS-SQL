@@ -42,21 +42,17 @@ def execute_sql_with_timeout(db_path: str, sql: str, timeout: int = 5) -> Tuple[
     start_time = time.time()
     try:
         conn = sqlite3.connect(db_path, timeout=timeout)
-        # BIRD evaluation often requires limiting results or executing within strict time
-        # Here we just fetch all to get the result set for majority voting
         cursor = conn.cursor()
         cursor.execute(sql)
         results = cursor.fetchall()
-
-        # Convert results to a canonical string for comparison (handling sorting if needed,
-        # though strict BIRD eval might not sort. We sort to group equivalent unordered sets)
-        res_str = str(sorted([str(row) for row in results]))
         conn.close()
         exec_time = time.time() - start_time
-        return True, res_str, exec_time
+        # Convert to set of tuples for comparison (order-independent, like official BIRD EX)
+        res_set = frozenset(results)
+        return True, res_set, exec_time
     except Exception as e:
         exec_time = time.time() - start_time
-        return False, str(e), exec_time
+        return False, frozenset(), exec_time
 
 
 def build_examples_text(examples: List[Dict[str, Any]]) -> str:
@@ -185,10 +181,16 @@ def run_benchmark(
     questions = load_benchmark(benchmark_path)
     if limit:
         questions = questions[:limit]
-        
+
     print(f"Loaded {len(questions)} questions")
-    
+
     results_detail = []
+    difficulty_results = {
+        "simple": [],
+        "moderate": [],
+        "challenging": [],
+        "unknown": []
+    }
     
     for q_idx, q in enumerate(questions):
         db_id = q["db_id"]
@@ -422,21 +424,21 @@ def run_benchmark(
             })
             continue
 
-        # Group executions by result_str and track best (minimum) execution time per group
-        result_groups = {}  # result_str -> list of {sql, exec_time}
+        # Group executions by result_set and track best (minimum) execution time per group
+        result_groups = {}  # result_frozenset -> list of {sql, exec_time}
         for exec_item in all_executions:
-            res_str = exec_item["result_str"]
-            if res_str not in result_groups:
-                result_groups[res_str] = []
-            result_groups[res_str].append({
+            res_set = exec_item["result_str"]  # This is now a frozenset
+            if res_set not in result_groups:
+                result_groups[res_set] = []
+            result_groups[res_set].append({
                 "sql": exec_item["sql"],
                 "exec_time": exec_item["exec_time"]
             })
 
         # Find best (minimum) execution time per group - this is the normalizer
-        group_normalizers = {}  # result_str -> best_exec_time
-        for res_str, items in result_groups.items():
-            group_normalizers[res_str] = min(item["exec_time"] for item in items)
+        group_normalizers = {}  # result_frozenset -> best_exec_time
+        for res_set, items in result_groups.items():
+            group_normalizers[res_set] = min(item["exec_time"] for item in items)
 
         # Calculate confidence for each execution using the formula:
         # confidence(qi) = 1/N * sum from j=1 to N of (exec(qi) = exec(qj))
@@ -444,15 +446,15 @@ def run_benchmark(
         # This simplifies to: confidence = count(result_i) / N
         execution_confidences = []  # list of {sql, result_str, confidence, exec_time}
         for exec_item in all_executions:
-            res_str = exec_item["result_str"]
-            count_same_result = len(result_groups[res_str])
+            res_set = exec_item["result_str"]
+            count_same_result = len(result_groups[res_set])
             confidence = count_same_result / N_valid
             execution_confidences.append({
                 "sql": exec_item["sql"],
-                "result_str": res_str,
+                "result_str": res_set,
                 "confidence": confidence,
                 "exec_time": exec_item["exec_time"],
-                "normalized_by": group_normalizers[res_str]
+                "normalized_by": group_normalizers[res_set]
             })
 
         # Find the result group with highest confidence (most common result)
@@ -465,33 +467,29 @@ def run_benchmark(
         # Pick the shortest winning SQL as the representative
         representative_sql = min(winning_sqls, key=len)
 
-        # Execution evaluation against ground truth
-        gt_success, gt_res, gt_time = execute_sql_with_timeout(db_path, ground_truth)
-
-        is_correct = (gt_success and most_common_result == gt_res)
+        # Execution evaluation against ground truth (for reference, not final verdict)
+        gt_success, gt_res_set, gt_time = execute_sql_with_timeout(db_path, ground_truth)
         winner_confidence = top_count / N_valid
-
-        print(f"  Confidence: {winner_confidence:.2f} ({top_count}/{N_valid}) -> {'CORRECT' if is_correct else 'INCORRECT'}")
 
         # Collect queries with confidence > 0.2, grouped by result with best speed as normalizer
         high_conf_sqls = []
         processed_results = set()
-        for res_str, count in result_counts.items():
+        for res_set, count in result_counts.items():
             conf = count / N_valid
-            if conf > 0.2 and res_str not in processed_results:
-                processed_results.add(res_str)
+            if conf > 0.2 and res_set not in processed_results:
+                processed_results.add(res_set)
                 # Find all unique SQLs for this result group
-                group_sqls = list(set(item["sql"] for item in all_executions if item["result_str"] == res_str))
+                group_sqls = list(set(item["sql"] for item in all_executions if item["result_str"] == res_set))
                 # Pick representative (shortest SQL)
                 rep = min(group_sqls, key=len)
                 high_conf_sqls.append({
                     "sql": rep,
                     "confidence": conf,
                     "count": count,
-                    "best_exec_time": group_normalizers[res_str],
+                    "best_exec_time": group_normalizers[res_set],
                     "all_sqls_in_group": group_sqls
                 })
-        
+
         # Sort by confidence descending
         high_conf_sqls.sort(key=lambda x: x["confidence"], reverse=True)
 
@@ -507,6 +505,7 @@ def run_benchmark(
         
         selected_sql = None
         selection_reasoning = None
+        is_correct = False  # Will be set after selection
         
         if len(high_conf_candidates) > 0:
             # Format candidate SQLs as numbered list (multiple-choice format)
@@ -632,11 +631,21 @@ def run_benchmark(
         else:
             print("    No high-confidence candidates (confidence > 0.2) for selection")
 
-        # Re-evaluate correctness with the selected SQL
+        # Re-evaluate correctness with the selected SQL using official BIRD EX metric
         if selected_sql:
-            selected_success, selected_res, _ = execute_sql_with_timeout(db_path, selected_sql)
-            is_correct = (gt_success and selected_res == gt_res)
+            selected_success, selected_res_set, _ = execute_sql_with_timeout(db_path, selected_sql)
+            # Official BIRD EX: compare sets (order-independent)
+            is_correct = (gt_success and selected_success and selected_res_set == gt_res_set)
             print(f"    Selected SQL correctness: {'CORRECT' if is_correct else 'INCORRECT'}")
+        else:
+            # No selection was made, report on majority vote result
+            majority_success, majority_res_set, _ = execute_sql_with_timeout(db_path, representative_sql)
+            is_correct = (gt_success and majority_success and majority_res_set == gt_res_set)
+            print(f"\n  Majority Vote Result: {'CORRECT' if is_correct else 'INCORRECT'}")
+            print(f"    Confidence: {winner_confidence:.2f} ({top_count}/{N_valid})")
+
+        # Track results by difficulty
+        difficulty_results[difficulty].append(is_correct)
 
         results_detail.append({
             "question_id": q.get("question_id", q_idx),
@@ -663,6 +672,28 @@ def run_benchmark(
         # Save intermediate
         with open(os.path.join(output_dir, "benchmark_results.json"), "w") as f:
             json.dump(results_detail, f, indent=2)
+
+    # Print final summary with difficulty breakdown (like official BIRD EX)
+    print("\n" + "="*80)
+    print("FINAL RESULTS (Execution Accuracy - EX)")
+    print("="*80)
+    
+    total_correct = sum(1 for r in results_detail if r.get("is_correct", False))
+    total = len(results_detail)
+    
+    print(f"\n{'Difficulty':<20} {'Correct':<20} {'Total':<20} {'Accuracy':<20}")
+    print("-"*80)
+    
+    for diff in ["simple", "moderate", "challenging", "unknown"]:
+        correct = sum(difficulty_results[diff])
+        count = len(difficulty_results[diff])
+        acc = (correct / count * 100) if count > 0 else 0
+        print(f"{diff:<20} {correct:<20} {count:<20} {acc:.2f}%")
+    
+    print("-"*80)
+    overall_acc = (total_correct / total * 100) if total > 0 else 0
+    print(f"{'OVERALL':<20} {total_correct:<20} {total:<20} {overall_acc:.2f}%")
+    print("="*80)
 
     print("\nDone! Results saved to", output_dir)
 
