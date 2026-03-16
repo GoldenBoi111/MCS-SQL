@@ -949,6 +949,7 @@ def gpu_worker(gpu_id, benchmark_path, db_root, output_dir, questions_chunk):
     """
     import os
     import gc
+    import torch
     
     # Set CUDA visible device BEFORE any torch operations
     os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
