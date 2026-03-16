@@ -13,6 +13,7 @@ import json
 import random
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
+from collections import defaultdict
 
 
 @dataclass
@@ -58,14 +59,29 @@ class TransformersLLMClient:
 
         print(f"Loading model: {model_name}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            trust_remote_code=True,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-            device_map="auto" if device == "cuda" else None,
-        )
-        if device == "cuda":
-            self.model = self.model.to(device)
+        
+        # Prepare model loading with A100 optimizations
+        model_kwargs = {
+            "trust_remote_code": True,
+            "torch_dtype": torch.float16,  # FP16 for faster inference on A100
+        }
+        
+        # Try Flash Attention 2 for 3-4x speedup on A100
+        try:
+            model_kwargs["attn_implementation"] = "flash_attention_2"
+            print("Using Flash Attention 2 for faster inference...")
+        except Exception as e:
+            print(f"Flash Attention 2 not available: {e}")
+            print("Falling back to SDPA attention...")
+            try:
+                model_kwargs["attn_implementation"] = "sdpa"
+            except Exception:
+                pass
+        
+        # Use device_map for optimal memory management on A100
+        model_kwargs["device_map"] = "auto"
+        
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
         print(f"Model loaded successfully on {device}")
 
     def generate(self, prompt: str, stop_sequences: Optional[List[str]] = None) -> str:
@@ -118,6 +134,180 @@ class TransformersLLMClient:
         input_length = inputs["input_ids"].shape[1]
         response = self.tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
         return response.strip()
+
+    def generate_batch(self, prompts: List[str], stop_sequences: Optional[List[str]] = None) -> List[str]:
+        """
+        Generate responses for multiple prompts in batch (faster on A100).
+        Each prompt in the batch samples independently when temperature > 0.
+
+        Args:
+            prompts: List of input prompt strings
+            stop_sequences: Optional list of sequences to stop generation at
+
+        Returns:
+            List of generated response strings
+        """
+        import torch
+        from transformers import StoppingCriteriaList, StoppingCriteria
+
+        if not prompts:
+            return []
+
+        # Tokenize all prompts with padding
+        inputs = self.tokenizer(prompts, return_tensors="pt", padding=True)
+        if self.device == "cuda":
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+        # Prepare stop sequences
+        stopping_criteria = None
+        if stop_sequences:
+            class StopOnSequence(StoppingCriteria):
+                def __init__(self, sequences, tokenizer):
+                    self.sequences = sequences
+                    self.tokenizer = tokenizer
+
+                def __call__(self, input_ids, scores, **kwargs):
+                    decoded = self.tokenizer.decode(input_ids[0], skip_special_tokens=True)
+                    return any(seq in decoded for seq in self.sequences)
+
+            stopping_criteria = StoppingCriteriaList([
+                StopOnSequence(stop_sequences, self.tokenizer)
+            ])
+
+        # Batch generation with KV cache enabled
+        with torch.inference_mode():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=self.max_new_tokens,
+                temperature=self.temperature,
+                do_sample=self.temperature > 0,
+                pad_token_id=self.tokenizer.eos_token_id,
+                stopping_criteria=stopping_criteria,
+                use_cache=True,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+
+        # Decode responses - extract only generated tokens for each
+        responses = []
+        for i, output in enumerate(outputs):
+            input_length = inputs["input_ids"][i].shape[0]
+            response = self.tokenizer.decode(output[input_length:], skip_special_tokens=True)
+            responses.append(response.strip())
+
+        return responses
+
+
+class MultiModelManager:
+    """
+    Manages multiple model copies for parallel batch generation on A100.
+    Distributes prompts across model copies for maximum throughput.
+    """
+    
+    def __init__(
+        self,
+        model_name: str,
+        device: str,
+        max_new_tokens: int,
+        temperature: float,
+        num_copies: int = 4,
+    ):
+        """
+        Initialize multiple model copies.
+        
+        Args:
+            model_name: Hugging Face model name
+            device: Device ('cuda')
+            max_new_tokens: Maximum tokens to generate
+            temperature: Sampling temperature
+            num_copies: Number of model copies to load
+        """
+        import torch
+        
+        self.num_copies = num_copies
+        self.device = device
+        self.models: List[TransformersLLMClient] = []
+        
+        print(f"Loading {num_copies} model copies for parallel generation...")
+        print(f"  Model: {model_name}")
+        print(f"  Device: {device}")
+        print(f"  Max tokens: {max_new_tokens}")
+        print(f"  Temperature: {temperature}")
+        
+        for i in range(num_copies):
+            print(f"  Loading model copy {i+1}/{num_copies}...")
+            model = TransformersLLMClient(
+                model_name=model_name,
+                device=device,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+            )
+            self.models.append(model)
+        
+        print(f"All {num_copies} model copies loaded successfully")
+    
+    def generate_parallel(self, prompts: List[str], stop_sequences: Optional[List[str]] = None) -> List[str]:
+        """
+        Generate responses by distributing prompts across all model copies.
+        Each model processes a batch of prompts in parallel.
+        
+        Args:
+            prompts: List of prompts to process
+            stop_sequences: Optional stop sequences
+            
+        Returns:
+            List of generated responses (same order as input prompts)
+        """
+        if not prompts:
+            return []
+        
+        n_prompts = len(prompts)
+        n_models = len(self.models)
+        
+        # Distribute prompts across models (round-robin for load balancing)
+        model_prompts: List[List[tuple]] = [[] for _ in range(n_models)]
+        for i, prompt in enumerate(prompts):
+            model_idx = i % n_models
+            model_prompts[model_idx].append((i, prompt))
+        
+        # Generate on each model in parallel
+        import threading
+        results: Dict[int, str] = {}
+        errors: List[Exception] = []
+        
+        def worker(model_idx: int):
+            try:
+                model = self.models[model_idx]
+                indices_prompts = model_prompts[model_idx]
+                
+                if indices_prompts:
+                    batch_prompts = [p for _, p in indices_prompts]
+                    batch_results = model.generate_batch(batch_prompts, stop_sequences)
+                    
+                    for (idx, _), result in zip(indices_prompts, batch_results):
+                        results[idx] = result
+            except Exception as e:
+                errors.append(e)
+        
+        # Start all workers
+        threads = []
+        for i in range(n_models):
+            t = threading.Thread(target=worker, args=(i,))
+            threads.append(t)
+            t.start()
+        
+        # Wait for all to complete
+        for t in threads:
+            t.join()
+        
+        # Check for errors
+        if errors:
+            print(f"Warning: {len(errors)} model errors during parallel generation")
+            for e in errors[:3]:  # Show first 3 errors
+                print(f"  Error: {e}")
+        
+        # Reconstruct results in original order
+        responses = [results.get(i, "") for i in range(n_prompts)]
+        return responses
 
 
 class SchemaLinker:

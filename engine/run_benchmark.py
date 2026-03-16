@@ -24,7 +24,7 @@ from typing import List, Dict, Any, Tuple
 
 from config import Config
 from literal_masker import LiteralMasker
-from schema_linking import SchemaLinker, TransformersLLMClient
+from schema_linking import SchemaLinker, TransformersLLMClient, MultiModelManager
 from training_dataset_indexer import TrainingDatasetIndexer
 from training_dataset_indexer_masked import MaskedTrainingDatasetIndexer
 
@@ -132,21 +132,25 @@ def run_benchmark(
     os.makedirs(output_dir, exist_ok=True)
     
     config = Config()
-    
-    # Need transformers for schema linking & generation
-    print("Loading LLM Client...")
-    llm_client = TransformersLLMClient(
+
+    # Load 4 model copies for parallel batch generation on A100
+    print("Loading Multi-Model Manager (4 copies for parallel generation)...")
+    multi_model = MultiModelManager(
         model_name=config.LLM_MODEL_NAME,
         device=config.LLM_DEVICE,
-        max_new_tokens=1024,
-        temperature=0.7
+        max_new_tokens=512,
+        temperature=0.3,  # Balance between diversity and speed
+        num_copies=4,
     )
     
-    # Setup schema linker
+    # Use first model for schema linker (single-threaded)
+    llm_client = multi_model.models[0]
+
+    # Setup schema linker with 20 iterations for majority voting
     linker = SchemaLinker(
         pt=config.TABLE_LINKING_ITERATIONS,
         pc=config.COLUMN_LINKING_ITERATIONS,
-        n=1, # For benchmark, we might just do 1 pass for speed, or set to MAJORITY_VOTE_N
+        n=20,  # 20 parallel outputs per iteration for robust schema linking
         llm_client=llm_client
     )
     
@@ -257,19 +261,22 @@ def run_benchmark(
         for pname, pex in prompt_variations:
             print(f"    {pname}: {len(pex)} examples")
             
-        # 4. Generate 100 Queries (5 prompts * 20 generations)
-        print("  Generating SQL candidates (5 x 20)...")
+        # 4. Generate 100 Queries (5 prompts × 20 generations) using parallel batch generation
+        print("  Generating SQL candidates (5 × 20 = 100 using parallel batch)...")
         generated_candidates = []
 
         # Get sample table contents for the linked schema
         sample_contents = get_sample_table_contents(db_path, list(linking_res.tables), sample_size=3)
         print(f"  Sample table contents:\n{sample_contents[:500]}...")
 
+        # Build all 100 prompts first (5 prompt types × 20 generations each)
+        all_prompts = []
+        prompt_metadata = []  # Track (prompt_type, gen_idx) for each prompt
+        
         for p_name, ex_list in prompt_variations:
-            print(f"    Prompt type: {p_name}")
             ex_text = build_examples_text(ex_list)
-
-            prompt = (
+            
+            base_prompt = (
                 prompt_template
                 .replace("{examples}", ex_text)
                 .replace("{schema_text}", schema_text)
@@ -277,88 +284,95 @@ def run_benchmark(
                 .replace("{question}", question)
                 .replace("{evidence}", evidence)
             )
-
-            print(f"    Prompt preview: {prompt[:300]}...")
             
+            # Create 20 copies of this prompt (each will sample independently)
             for gen_idx in range(20):
-                try:
-                    # Generate without stop sequences (rely on robust JSON parsing instead)
-                    response = llm_client.generate(prompt)
-                    print(f"      Gen {gen_idx+1}/20 - Response length: {len(response)}")
-                    
-                    # Extract SQL from JSON - ignore everything that's not JSON
-                    sql_query = ""
-                    
-                    # Strip markdown code fences
-                    response_stripped = response.strip()
-                    if response_stripped.startswith("```json"):
-                        response_stripped = response_stripped[7:]
-                    elif response_stripped.startswith("```"):
-                        response_stripped = response_stripped[3:]
-                    
-                    # Find the first { and extract only the JSON object
-                    start_idx = response_stripped.find("{")
-                    if start_idx != -1:
-                        # Find matching closing brace by counting braces, ignoring content in strings
-                        brace_count = 0
-                        end_idx = -1
-                        in_string = False
-                        escape_next = False
-                        
-                        for i, char in enumerate(response_stripped[start_idx:], start_idx):
-                            if escape_next:
-                                escape_next = False
-                                continue
-                            if char == '\\' and in_string:
-                                escape_next = True
-                                continue
-                            if char == '"' and not escape_next:
-                                in_string = not in_string
-                                continue
-                            if not in_string:
-                                if char == "{":
-                                    brace_count += 1
-                                elif char == "}":
-                                    brace_count -= 1
-                                    if brace_count == 0:
-                                        end_idx = i + 1
-                                        break
-                        
-                        if end_idx > start_idx:
-                            json_str = response_stripped[start_idx:end_idx]
-                            # Remove trailing code fence if present
-                            if json_str.rstrip().endswith("```"):
-                                json_str = json_str.rstrip()[:-3]
-                            
-                            print(f"      Extracted JSON ({len(json_str)} chars): {json_str[:200]}...")
-                            try:
-                                parsed = json.loads(json_str)
-                                sql_query = parsed.get("sql", "")
-                                print(f"      Parsed SQL: {sql_query[:100] if sql_query else 'None'}...")
-                            except json.JSONDecodeError as je:
-                                print(f"      JSON parse error: {je}")
-                                print(f"      Full JSON attempt: {json_str}")
+                all_prompts.append(base_prompt)
+                prompt_metadata.append((p_name, gen_idx))
+        
+        print(f"  Built {len(all_prompts)} prompts for parallel generation...")
+        
+        # Generate all 100 responses in parallel using 4 model copies
+        print("  Running parallel batch generation across 4 models...")
+        all_responses = multi_model.generate_parallel(all_prompts, stop_sequences=None)
+        
+        # Parse responses and extract SQL
+        print("  Parsing responses...")
+        for i, response in enumerate(all_responses):
+            p_name, gen_idx = prompt_metadata[i]
+            
+            try:
+                print(f"    Gen {i+1}/100 - Response length: {len(response)}")
+                
+                # Extract SQL from JSON - ignore everything that's not JSON
+                sql_query = ""
 
-                    if not sql_query:
-                        # Method 2: Regex fallback for SQL
-                        import re
-                        match = re.search(r'SELECT.*?(?:;|$)', response, re.IGNORECASE | re.DOTALL)
-                        if match:
-                            sql_query = match.group(0).strip()
-                            print(f"      Regex extracted SQL: {sql_query[:100]}...")
+                # Strip markdown code fences
+                response_stripped = response.strip()
+                if response_stripped.startswith("```json"):
+                    response_stripped = response_stripped[7:]
+                elif response_stripped.startswith("```"):
+                    response_stripped = response_stripped[3:]
 
-                    if sql_query:
-                        generated_candidates.append({
-                            "sql": sql_query,
-                            "prompt_type": p_name,
-                            "gen_idx": gen_idx
-                        })
-                    else:
-                        print(f"      No SQL extracted!")
-                        print(f"      Full response: {response}")
-                except Exception as e:
-                    print(f"    Generation error: {e}")
-                    print(f"    Raw response: {response[:500]}...")
+                # Find the first { and extract only the JSON object
+                start_idx = response_stripped.find("{")
+                if start_idx != -1:
+                    # Find matching closing brace by counting braces, ignoring content in strings
+                    brace_count = 0
+                    end_idx = -1
+                    in_string = False
+                    escape_next = False
+
+                    for j, char in enumerate(response_stripped[start_idx:], start_idx):
+                        if escape_next:
+                            escape_next = False
+                            continue
+                        if char == '\\' and in_string:
+                            escape_next = True
+                            continue
+                        if char == '"' and not escape_next:
+                            in_string = not in_string
+                            continue
+                        if not in_string:
+                            if char == "{":
+                                brace_count += 1
+                            elif char == "}":
+                                brace_count -= 1
+                                if brace_count == 0:
+                                    end_idx = j + 1
+                                    break
+
+                    if end_idx > start_idx:
+                        json_str = response_stripped[start_idx:end_idx]
+                        # Remove trailing code fence if present
+                        if json_str.rstrip().endswith("```"):
+                            json_str = json_str.rstrip()[:-3]
+
+                        try:
+                            parsed = json.loads(json_str)
+                            sql_query = parsed.get("sql", "")
+                            print(f"      Parsed SQL: {sql_query[:100] if sql_query else 'None'}...")
+                        except json.JSONDecodeError as je:
+                            print(f"      JSON parse error: {je}")
+
+                if not sql_query:
+                    # Method 2: Regex fallback for SQL
+                    import re
+                    match = re.search(r'SELECT.*?(?:;|$)', response, re.IGNORECASE | re.DOTALL)
+                    if match:
+                        sql_query = match.group(0).strip()
+                        print(f"      Regex extracted SQL: {sql_query[:100]}...")
+
+                if sql_query:
+                    generated_candidates.append({
+                        "sql": sql_query,
+                        "prompt_type": p_name,
+                        "gen_idx": gen_idx
+                    })
+                else:
+                    print(f"      No SQL extracted!")
+            except Exception as e:
+                print(f"    Parse error: {e}")
                     
         print(f"  Generated {len(generated_candidates)} valid SQL candidates")
         
@@ -509,21 +523,26 @@ def run_benchmark(
             
             print(f"    Selection prompt: {selection_prompt[:300]}...")
             print(f"    Candidates (confidence > 0.2): {len(selection_candidates)}")
-            
-            # Sample n=20 responses from LLM for majority voting
+
+            # Sample n=20 responses from LLM for majority voting using parallel generation
             n_selection_samples = 20
             selection_votes = []
+
+            print(f"    Generating {n_selection_samples} selection responses in parallel...")
             
-            for sel_idx in range(n_selection_samples):
+            # Create 20 copies of the selection prompt
+            selection_prompts = [selection_prompt] * n_selection_samples
+            
+            # Generate all 20 responses in parallel
+            selection_responses = multi_model.generate_parallel(selection_prompts, stop_sequences=None)
+            
+            # Parse all responses
+            print(f"    Parsing {len(selection_responses)} selection responses...")
+            for sel_idx, selection_response in enumerate(selection_responses):
                 try:
-                    selection_response = llm_client.generate(selection_prompt)
-                    
                     sql = None
                     reasoning = None
-                    
-                    # Debug: Show response preview
-                    print(f"    Sample {sel_idx+1}/{n_selection_samples} - Response length: {len(selection_response)}")
-                    
+
                     # Method 1: Try to parse JSON
                     start_idx = selection_response.find("{")
                     if start_idx != -1:
@@ -531,7 +550,7 @@ def run_benchmark(
                         end_idx = -1
                         in_string = False
                         escape_next = False
-                        
+
                         for i, char in enumerate(selection_response[start_idx:], start_idx):
                             if escape_next:
                                 escape_next = False
@@ -550,13 +569,13 @@ def run_benchmark(
                                     if brace_count == 0:
                                         end_idx = i + 1
                                         break
-                        
+
                         if end_idx > start_idx:
                             json_str = selection_response[start_idx:end_idx]
                             # Remove trailing code fence if present
                             if json_str.rstrip().endswith("```"):
                                 json_str = json_str.rstrip()[:-3]
-                            
+
                             try:
                                 parsed = json.loads(json_str)
                                 sql = parsed.get("sql", "")
@@ -573,25 +592,21 @@ def run_benchmark(
                                 reasoning_match = re.search(r'"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"', selection_response, re.DOTALL)
                                 if reasoning_match:
                                     reasoning = reasoning_match.group(1).replace('\\"', '"')
-                                
+
                                 if sql:
-                                    print(f"      Extracted via regex (JSON error: {je})")
+                                    print(f"      Sample {sel_idx+1}: Extracted via regex")
                                 else:
-                                    print(f"      Could not extract SQL (JSON error: {je})")
-                                    print(f"      JSON attempt: {json_str[:150]}...")
+                                    print(f"      Sample {sel_idx+1}: Could not extract SQL")
                         else:
-                            print(f"      Could not find matching braces in response")
-                            print(f"      Response preview: {selection_response[:200]}...")
+                            print(f"      Sample {sel_idx+1}: No matching braces")
                     else:
-                        print(f"      No JSON object found in response")
-                        print(f"      Response preview: {selection_response[:200]}...")
-                    
+                        print(f"      Sample {sel_idx+1}: No JSON found")
+
                     if sql:
                         selection_votes.append({"sql": sql, "reasoning": reasoning or ""})
-                        print(f"      SQL: {sql[:100]}...")
+                        print(f"      Sample {sel_idx+1}: {sql[:80]}...")
                 except Exception as e:
-                    print(f"    Sample {sel_idx+1}/{n_selection_samples} outer error: {e}")
-                    print(f"    Response: {selection_response[:200]}...")
+                    print(f"      Sample {sel_idx+1} error: {e}")
             
             # Majority voting on selection
             if selection_votes:
