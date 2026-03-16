@@ -60,26 +60,12 @@ class TransformersLLMClient:
         print(f"Loading model: {model_name}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         
-        # Prepare model loading with A100 optimizations
+        # Load model with FP16 for faster inference on GPU
         model_kwargs = {
             "trust_remote_code": True,
-            "torch_dtype": torch.float16,  # FP16 for faster inference on A100
+            "torch_dtype": torch.float16,
+            "device_map": "auto",
         }
-        
-        # Try Flash Attention 2 for 3-4x speedup on A100
-        try:
-            model_kwargs["attn_implementation"] = "flash_attention_2"
-            print("Using Flash Attention 2 for faster inference...")
-        except Exception as e:
-            print(f"Flash Attention 2 not available: {e}")
-            print("Falling back to SDPA attention...")
-            try:
-                model_kwargs["attn_implementation"] = "sdpa"
-            except Exception:
-                pass
-        
-        # Use device_map for optimal memory management on A100
-        model_kwargs["device_map"] = "auto"
         
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
         print(f"Model loaded successfully on {device}")
