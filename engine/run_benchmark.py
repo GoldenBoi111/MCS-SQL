@@ -938,6 +938,36 @@ def generate_detailed_report(results: List[Dict], output_dir: str):
     print("="*100)
 
 
+# =============================================================================
+# Multi-GPU Worker Function (must be at module level for pickling)
+# =============================================================================
+
+def gpu_worker(gpu_id, benchmark_path, db_root, output_dir, questions_chunk):
+    """
+    Worker function to run benchmark on a specific GPU.
+    Must be at module level (not nested) for multiprocessing pickling.
+    """
+    import os
+    import gc
+    
+    # Set CUDA visible device BEFORE any torch operations
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+
+    # Clear GPU memory
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    # Run benchmark with gpu_id=0 since CUDA_VISIBLE_DEVICES makes it see only one GPU
+    run_benchmark(
+        benchmark_path=benchmark_path,
+        db_root=db_root,
+        output_dir=output_dir,
+        limit=None,  # Already chunked
+        gpu_id=0,  # In worker, we see only 1 GPU (set by CUDA_VISIBLE_DEVICES)
+        questions_chunk=questions_chunk
+    )
+
+
 def run_multi_gpu_benchmark(
     benchmark_path: str,
     db_root: str,
@@ -997,28 +1027,7 @@ def run_multi_gpu_benchmark(
     
     # Run benchmarks in parallel (one process per GPU)
     print(f"\nStarting {num_gpus} parallel benchmark processes...")
-    
-    def gpu_worker(gpu_id, benchmark_path, db_root, output_dir, questions_chunk):
-        """Worker function to run benchmark on a specific GPU."""
-        import os
-        import gc
-        # Set CUDA visible device BEFORE any torch operations
-        os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
 
-        # Clear GPU memory
-        torch.cuda.empty_cache()
-        gc.collect()
-        
-        # Run benchmark with gpu_id=0 since CUDA_VISIBLE_DEVICES makes it see only one GPU
-        run_benchmark(
-            benchmark_path=benchmark_path,
-            db_root=db_root,
-            output_dir=output_dir,
-            limit=None,  # Already chunked
-            gpu_id=0,  # In worker, we see only 1 GPU (set by CUDA_VISIBLE_DEVICES)
-            questions_chunk=questions_chunk
-        )
-    
     # Start processes
     processes = []
     for i in range(num_gpus):
@@ -1029,13 +1038,13 @@ def run_multi_gpu_benchmark(
             )
             p.start()
             processes.append(p)
-    
+
     # Wait for all to complete
     for p in processes:
         p.join()
-    
+
     print("\nAll GPU processes completed!")
-    
+
     # Merge results from all GPUs
     print("\nMerging results from all GPUs...")
     all_results = []
