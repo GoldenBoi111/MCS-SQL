@@ -28,6 +28,26 @@ from schema_linking import SchemaLinker, TransformersLLMClient, MultiModelManage
 from training_dataset_indexer import TrainingDatasetIndexer
 from training_dataset_indexer_masked import MaskedTrainingDatasetIndexer
 
+# Multi-GPU setup
+def setup_multi_gpu(num_gpus: int = 4):
+    """Setup multi-GPU environment and return list of GPU IDs."""
+    import torch
+    available_gpus = torch.cuda.device_count()
+    print(f"Available GPUs: {available_gpus}")
+    
+    if available_gpus < num_gpus:
+        print(f"Warning: Requested {num_gpus} GPUs, but only {available_gpus} available")
+        num_gpus = available_gpus
+    
+    gpu_ids = list(range(num_gpus))
+    print(f"Using GPUs: {gpu_ids}")
+    
+    for i in gpu_ids:
+        print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+        print(f"    Memory: {torch.cuda.get_device_properties(i).total_memory / 1e9:.2f} GB")
+    
+    return gpu_ids
+
 
 logger = logging.getLogger(__name__)
 
@@ -123,27 +143,62 @@ def run_benchmark(
     benchmark_path: str,
     db_root: str,
     output_dir: str,
-    limit: int = None
+    limit: int = None,
+    gpu_id: int = None,
+    questions_chunk: List[Dict] = None
 ):
+    """
+    Run benchmark on a single GPU or all GPUs.
+    
+    Args:
+        benchmark_path: Path to benchmark JSON file
+        db_root: Path to database root directory
+        output_dir: Output directory for results
+        limit: Optional limit on number of questions
+        gpu_id: Specific GPU ID to use (None for all)
+        questions_chunk: Subset of questions to process (for multi-GPU)
+    """
     os.makedirs(output_dir, exist_ok=True)
     
+    # Set GPU device if specified
+    if gpu_id is not None:
+        import torch
+        torch.cuda.set_device(gpu_id)
+        print(f"Running on GPU {gpu_id}")
+    
     config = Config()
+    
+    # Determine number of model copies based on model size and GPU
+    # For 20B model: 1 copy per GPU (uses ~40-45 GB VRAM)
+    # For 7B model: 2 copies per GPU (uses ~28 GB VRAM)
+    model_name = config.LLM_MODEL_NAME.lower()
+    
+    # Auto-detect model size from model name
+    if "20b" in model_name or "32b" in model_name or "coder" in model_name or "gpt-oss" in model_name:
+        num_copies = 1  # Larger model (20B+), 1 copy per GPU
+        print("Detected large model (20B+ or gpt-oss-20b), using 1 copy per GPU")
+    elif "14b" in model_name or "13b" in model_name:
+        num_copies = 1  # Medium model (13-14B), 1 copy per GPU
+        print("Detected medium model (13-14B), using 1 copy per GPU")
+    else:
+        num_copies = 2  # Smaller model (7B), 2 copies per GPU
+        print("Detected standard model (7B), using 2 copies per GPU")
 
-    # Load 2 model copies for parallel batch generation on A100
-    # (2 copies fit in 80 GB VRAM with room for overhead)
-    print("Loading Multi-Model Manager (2 copies for parallel generation)...")
+    # Load model copies for parallel batch generation
+    print(f"Loading Multi-Model Manager ({num_copies} copies for parallel generation) on GPU {gpu_id if gpu_id is not None else 'all'}...")
     multi_model = MultiModelManager(
         model_name=config.LLM_MODEL_NAME,
         device=config.LLM_DEVICE,
         max_new_tokens=512,
         temperature=0.3,  # Balance between diversity and speed
-        num_copies=2,
+        num_copies=num_copies,
+        gpu_id=gpu_id,  # Pass GPU ID for multi-GPU support
     )
-    
+
     # Use first model for schema linker (single-threaded)
     # But pass multi_model for batch generation capability
     llm_client = multi_model.models[0]
-    
+
     # Setup schema linker with 20 iterations for majority voting
     # Pass the multi_model so it can use generate_parallel
     linker = SchemaLinker(
@@ -152,7 +207,7 @@ def run_benchmark(
         n=20,  # 20 parallel outputs per iteration for robust schema linking
         llm_client=multi_model,  # Use multi_model for batch generation
     )
-    
+
     # Load Indexes
     print("Loading Standard Index...")
     standard_indexer = TrainingDatasetIndexer(
@@ -178,9 +233,14 @@ def run_benchmark(
     with open(config.PROMPTS_DIR / "SQL_selection.txt", "r") as f:
         selection_template = f.read()
 
-    questions = load_benchmark(benchmark_path)
-    if limit:
-        questions = questions[:limit]
+    # Load questions (or use provided chunk for multi-GPU)
+    if questions_chunk is not None:
+        questions = questions_chunk
+        print(f"Processing chunk of {len(questions)} questions on GPU {gpu_id}")
+    else:
+        questions = load_benchmark(benchmark_path)
+        if limit:
+            questions = questions[:limit]
 
     print(f"Loaded {len(questions)} questions")
 
@@ -646,15 +706,20 @@ def run_benchmark(
 
         # Track results by difficulty
         difficulty_results[difficulty].append(is_correct)
+        
+        # Collect execution times for this question
+        execution_times = [item["exec_time"] for item in all_executions if "exec_time" in item]
 
         results_detail.append({
             "question_id": q.get("question_id", q_idx),
             "question": question,
             "db_id": db_id,
+            "difficulty": difficulty,
             "ground_truth": ground_truth,
             "winner_sql": representative_sql,
             "is_correct": is_correct,
             "winner_confidence": winner_confidence,
+            "execution_times": execution_times,
             "high_confidence_alternatives": high_conf_sqls,
             "selection": {
                 "selected_sql": selected_sql if len(high_conf_candidates) > 0 else None,
@@ -673,29 +738,322 @@ def run_benchmark(
         with open(os.path.join(output_dir, "benchmark_results.json"), "w") as f:
             json.dump(results_detail, f, indent=2)
 
-    # Print final summary with difficulty breakdown (like official BIRD EX)
-    print("\n" + "="*80)
-    print("FINAL RESULTS (Execution Accuracy - EX)")
-    print("="*80)
-    
-    total_correct = sum(1 for r in results_detail if r.get("is_correct", False))
-    total = len(results_detail)
-    
-    print(f"\n{'Difficulty':<20} {'Correct':<20} {'Total':<20} {'Accuracy':<20}")
-    print("-"*80)
-    
-    for diff in ["simple", "moderate", "challenging", "unknown"]:
-        correct = sum(difficulty_results[diff])
-        count = len(difficulty_results[diff])
-        acc = (correct / count * 100) if count > 0 else 0
-        print(f"{diff:<20} {correct:<20} {count:<20} {acc:.2f}%")
-    
-    print("-"*80)
-    overall_acc = (total_correct / total * 100) if total > 0 else 0
-    print(f"{'OVERALL':<20} {total_correct:<20} {total:<20} {overall_acc:.2f}%")
-    print("="*80)
+    # Generate detailed report
+    generate_detailed_report(results_detail, output_dir)
 
-    print("\nDone! Results saved to", output_dir)
+
+def generate_detailed_report(results: List[Dict], output_dir: str):
+    """
+    Generate comprehensive benchmark report with detailed statistics.
+    
+    Args:
+        results: List of result dictionaries from all questions
+        output_dir: Directory to save report
+    """
+    import statistics
+    
+    print("\n" + "="*100)
+    print(" " * 30 + "DETAILED BENCHMARK REPORT")
+    print("="*100)
+    
+    # Overall Statistics
+    total = len(results)
+    correct = sum(1 for r in results if r.get("is_correct", False))
+    overall_acc = (correct / total * 100) if total > 0 else 0
+    
+    print(f"\n📊 OVERALL STATISTICS")
+    print("-"*100)
+    print(f"  Total Questions:     {total}")
+    print(f"  Correct:             {correct} ({overall_acc:.2f}%)")
+    print(f"  Incorrect:           {total - correct} ({100 - overall_acc:.2f}%)")
+    
+    # Execution Time Statistics
+    all_exec_times = []
+    for r in results:
+        if "execution_times" in r:
+            all_exec_times.extend(r["execution_times"])
+    
+    if all_exec_times:
+        print(f"\n⏱️  EXECUTION TIME STATISTICS (All SQL Queries)")
+        print("-"*100)
+        print(f"  Total Queries Executed:  {len(all_exec_times)}")
+        print(f"  Mean Execution Time:     {statistics.mean(all_exec_times)*1000:.2f} ms")
+        print(f"  Median Execution Time:   {statistics.median(all_exec_times)*1000:.2f} ms")
+        print(f"  Std Dev:                 {statistics.stdev(all_exec_times)*1000:.2f} ms" if len(all_exec_times) > 1 else "  Std Dev: N/A")
+        print(f"  Min Execution Time:      {min(all_exec_times)*1000:.2f} ms")
+        print(f"  Max Execution Time:      {max(all_exec_times)*1000:.2f} ms")
+    
+    # Generation Statistics
+    total_generated = sum(r.get("metrics", {}).get("generated", 0) for r in results)
+    total_valid = sum(r.get("metrics", {}).get("valid_generations", 0) for r in results)
+    total_errors = sum(r.get("metrics", {}).get("execution_errors", 0) for r in results)
+    unique_sqls = sum(r.get("metrics", {}).get("unique_valid_sqls", 0) for r in results)
+    
+    print(f"\n🔧 GENERATION STATISTICS")
+    print("-"*100)
+    print(f"  Total SQL Generated:     {total_generated}")
+    print(f"  Valid Executions:        {total_valid} ({total_valid/total_generated*100:.1f}% success rate)")
+    print(f"  Execution Errors:        {total_errors} ({total_errors/total_generated*100:.1f}%)")
+    print(f"  Unique SQL Variations:   {unique_sqls} (avg {unique_sqls/total:.1f} per question)")
+    
+    # Confidence Statistics
+    confidences = [r.get("winner_confidence", 0) for r in results]
+    if confidences:
+        print(f"\n📈 CONFIDENCE STATISTICS (Majority Voting)")
+        print("-"*100)
+        print(f"  Mean Confidence:         {statistics.mean(confidences):.3f}")
+        print(f"  Median Confidence:       {statistics.median(confidences):.3f}")
+        print(f"  High Confidence (>0.5):  {sum(1 for c in confidences if c > 0.5)} ({sum(1 for c in confidences if c > 0.5)/len(confidences)*100:.1f}%)")
+        print(f"  Low Confidence (<0.2):   {sum(1 for c in confidences if c < 0.2)} ({sum(1 for c in confidences if c < 0.2)/len(confidences)*100:.1f}%)")
+    
+    # Difficulty Breakdown
+    print(f"\n📚 ACCURACY BY DIFFICULTY")
+    print("-"*100)
+    difficulty_stats = {}
+    for diff in ["simple", "moderate", "challenging", "unknown"]:
+        diff_results = [r for r in results if r.get("difficulty") == diff]
+        if diff_results:
+            diff_correct = sum(1 for r in diff_results if r.get("is_correct", False))
+            diff_total = len(diff_results)
+            diff_acc = (diff_correct / diff_total * 100) if diff_total > 0 else 0
+            difficulty_stats[diff] = {
+                "correct": diff_correct,
+                "total": diff_total,
+                "accuracy": diff_acc
+            }
+            print(f"  {diff.capitalize():<15} {diff_correct:>3}/{diff_total:<3} ({diff_acc:>6.2f}%)")
+    
+    # Per-Database Breakdown
+    print(f"\n🗄️  ACCURACY BY DATABASE")
+    print("-"*100)
+    db_stats = {}
+    db_results = {}
+    for r in results:
+        db_id = r.get("db_id", "unknown")
+        if db_id not in db_results:
+            db_results[db_id] = []
+        db_results[db_id].append(r)
+    
+    # Sort databases by accuracy (descending)
+    db_accuracy = []
+    for db_id, db_qs in db_results.items():
+        db_correct = sum(1 for r in db_qs if r.get("is_correct", False))
+        db_total = len(db_qs)
+        db_acc = (db_correct / db_total * 100) if db_total > 0 else 0
+        db_accuracy.append((db_id, db_acc, db_correct, db_total))
+    
+    db_accuracy.sort(key=lambda x: x[1], reverse=True)
+    
+    print(f"  {'Database':<40} {'Correct':>10} {'Total':>8} {'Accuracy':>10}")
+    print("  " + "-"*70)
+    for db_id, acc, correct_count, total_count in db_accuracy:
+        db_name = db_id.split('/')[-1] if '/' in db_id else db_id
+        print(f"  {db_name:<40} {correct_count:>10} {total_count:>8} {acc:>9.2f}%")
+    
+    # Per-Database Difficulty Breakdown
+    print(f"\n🗄️  PER-DATABASE BREAKDOWN BY DIFFICULTY")
+    print("-"*100)
+    
+    for db_id, db_qs in db_results.items():
+        db_name = db_id.split('/')[-1] if '/' in db_id else db_id
+        print(f"\n  📁 {db_name} ({len(db_qs)} questions)")
+        print("  " + "-"*70)
+        print(f"    {'Difficulty':<15} {'Correct':>10} {'Total':>8} {'Accuracy':>10} {'Avg Exec Time':>15}")
+        print("    " + "-"*70)
+        
+        for diff in ["simple", "moderate", "challenging", "unknown"]:
+            diff_qs = [r for r in db_qs if r.get("difficulty") == diff]
+            if diff_qs:
+                diff_correct = sum(1 for r in diff_qs if r.get("is_correct", False))
+                diff_total = len(diff_qs)
+                diff_acc = (diff_correct / diff_total * 100) if diff_total > 0 else 0
+                
+                # Average execution time for this difficulty
+                diff_exec_times = []
+                for r in diff_qs:
+                    if "execution_times" in r:
+                        diff_exec_times.extend(r["execution_times"])
+                avg_exec = statistics.mean(diff_exec_times)*1000 if diff_exec_times else 0
+                
+                print(f"    {diff.capitalize():<15} {diff_correct:>10} {diff_total:>8} {diff_acc:>9.2f}% {avg_exec:>12.2f} ms")
+    
+    # Selection Phase Statistics
+    selection_made = sum(1 for r in results if r.get("selection", {}).get("selected_sql") is not None)
+    print(f"\n🎯 SQL SELECTION PHASE STATISTICS")
+    print("-"*100)
+    print(f"  Selection Made:          {selection_made} ({selection_made/total*100:.1f}%)")
+    print(f"  Majority Vote Used:      {total - selection_made} ({(total - selection_made)/total*100:.1f}%)")
+    
+    # Save detailed report to file
+    report_data = {
+        "overall": {
+            "total": total,
+            "correct": correct,
+            "accuracy": overall_acc
+        },
+        "by_difficulty": difficulty_stats,
+        "by_database": {},
+        "execution_times": {
+            "mean_ms": statistics.mean(all_exec_times)*1000 if all_exec_times else 0,
+            "median_ms": statistics.median(all_exec_times)*1000 if all_exec_times else 0,
+            "min_ms": min(all_exec_times)*1000 if all_exec_times else 0,
+            "max_ms": max(all_exec_times)*1000 if all_exec_times else 0,
+            "std_ms": statistics.stdev(all_exec_times)*1000 if len(all_exec_times) > 1 else 0
+        },
+        "generation": {
+            "total_generated": total_generated,
+            "valid_executions": total_valid,
+            "errors": total_errors,
+            "unique_sqls": unique_sqls
+        },
+        "confidence": {
+            "mean": statistics.mean(confidences) if confidences else 0,
+            "median": statistics.median(confidences) if confidences else 0,
+            "high_confidence_ratio": sum(1 for c in confidences if c > 0.5)/len(confidences) if confidences else 0
+        }
+    }
+    
+    # Add per-database stats
+    for db_id, db_qs in db_results.items():
+        db_correct = sum(1 for r in db_qs if r.get("is_correct", False))
+        db_total = len(db_qs)
+        db_acc = (db_correct / db_total * 100) if db_total > 0 else 0
+        report_data["by_database"][db_id] = {
+            "total": db_total,
+            "correct": db_correct,
+            "accuracy": db_acc
+        }
+    
+    report_file = os.path.join(output_dir, "detailed_report.json")
+    with open(report_file, "w") as f:
+        json.dump(report_data, f, indent=2)
+    
+    print(f"\n💾 Detailed report saved to: {report_file}")
+    print("="*100)
+
+
+def run_multi_gpu_benchmark(
+    benchmark_path: str,
+    db_root: str,
+    output_dir: str,
+    limit: int = None,
+    num_gpus: int = 4
+):
+    """
+    Run benchmark across multiple GPUs using data parallelism.
+    Each GPU processes a different subset of questions independently.
+    
+    Args:
+        benchmark_path: Path to benchmark JSON file
+        db_root: Path to database root directory
+        output_dir: Output directory for results
+        limit: Optional limit on number of questions
+        num_gpus: Number of GPUs to use
+    """
+    import torch
+    import multiprocessing as mp
+    
+    # Setup GPUs
+    gpu_ids = setup_multi_gpu(num_gpus)
+    num_gpus = len(gpu_ids)
+    
+    # Load all questions
+    questions = load_benchmark(benchmark_path)
+    if limit:
+        questions = questions[:limit]
+    
+    print(f"\nTotal questions: {len(questions)}")
+    print(f"Distributing across {num_gpus} GPUs...")
+    
+    # Split questions evenly across GPUs
+    chunk_size = (len(questions) + num_gpus - 1) // num_gpus
+    question_chunks = []
+    for i in range(num_gpus):
+        start_idx = i * chunk_size
+        end_idx = min(start_idx + chunk_size, len(questions))
+        if start_idx < len(questions):
+            question_chunks.append(questions[start_idx:end_idx])
+        else:
+            question_chunks.append([])
+    
+    for i, chunk in enumerate(question_chunks):
+        print(f"  GPU {i}: {len(chunk)} questions")
+    
+    # Create output directories for each GPU
+    gpu_output_dirs = []
+    for i in range(num_gpus):
+        gpu_output_dir = os.path.join(output_dir, f"gpu_{i}")
+        os.makedirs(gpu_output_dir, exist_ok=True)
+        gpu_output_dirs.append(gpu_output_dir)
+    
+    # Run benchmarks in parallel (one process per GPU)
+    print(f"\nStarting {num_gpus} parallel benchmark processes...")
+    
+    def gpu_worker(gpu_id, benchmark_path, db_root, output_dir, questions_chunk):
+        """Worker function to run benchmark on a specific GPU."""
+        import os
+        # Set CUDA visible device BEFORE any torch operations
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+        
+        # Clear GPU memory
+        torch.cuda.empty_cache()
+        gc.collect()
+        
+        # Run benchmark with gpu_id=0 since CUDA_VISIBLE_DEVICES makes it see only one GPU
+        run_benchmark(
+            benchmark_path=benchmark_path,
+            db_root=db_root,
+            output_dir=output_dir,
+            limit=None,  # Already chunked
+            gpu_id=0,  # In worker, we see only 1 GPU (set by CUDA_VISIBLE_DEVICES)
+            questions_chunk=questions_chunk
+        )
+    
+    # Start processes
+    processes = []
+    for i in range(num_gpus):
+        if question_chunks[i]:  # Only start if there are questions
+            p = mp.Process(
+                target=gpu_worker,
+                args=(gpu_ids[i], benchmark_path, db_root, gpu_output_dirs[i], question_chunks[i])
+            )
+            p.start()
+            processes.append(p)
+    
+    # Wait for all to complete
+    for p in processes:
+        p.join()
+    
+    print("\nAll GPU processes completed!")
+    
+    # Merge results from all GPUs
+    print("\nMerging results from all GPUs...")
+    all_results = []
+    all_difficulty_results = {
+        "simple": [],
+        "moderate": [],
+        "challenging": [],
+        "unknown": []
+    }
+    
+    for i, gpu_output_dir in enumerate(gpu_output_dirs):
+        results_file = os.path.join(gpu_output_dir, "benchmark_results.json")
+        if os.path.exists(results_file):
+            with open(results_file, "r") as f:
+                gpu_results = json.load(f)
+                all_results.extend(gpu_results)
+                print(f"  GPU {i}: {len(gpu_results)} results")
+    
+    # Save merged results
+    merged_output_file = os.path.join(output_dir, "benchmark_results_merged.json")
+    with open(merged_output_file, "w") as f:
+        json.dump(all_results, f, indent=2)
+
+    # Generate detailed report
+    generate_detailed_report(all_results, output_dir)
+    
+    print(f"\nMerged results saved to: {merged_output_file}")
+    print(f"Speedup: ~{num_gpus}x faster than single GPU")
 
 
 if __name__ == "__main__":
@@ -704,6 +1062,18 @@ if __name__ == "__main__":
     parser.add_argument("--db_root", required=True, help="Path to databases dir")
     parser.add_argument("--output", default="outputs/benchmark_results")
     parser.add_argument("--limit", type=int, default=None)
-    
+    parser.add_argument("--multi-gpu", action="store_true", help="Use multiple GPUs")
+    parser.add_argument("--num-gpus", type=int, default=4, help="Number of GPUs to use")
+
     args = parser.parse_args()
-    run_benchmark(args.benchmark, args.db_root, args.output, args.limit)
+    
+    if args.multi_gpu:
+        run_multi_gpu_benchmark(
+            args.benchmark,
+            args.db_root,
+            args.output,
+            args.limit,
+            args.num_gpus
+        )
+    else:
+        run_benchmark(args.benchmark, args.db_root, args.output, args.limit)

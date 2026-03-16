@@ -26,7 +26,10 @@ class SchemaLinkingResult:
 
 
 class TransformersLLMClient:
-    """LLM client using Hugging Face Transformers for Qwen models."""
+    """
+    LLM client using Hugging Face Transformers.
+    Supports both Qwen models and GPT-OSS 20B with true batch generation.
+    """
 
     def __init__(
         self,
@@ -34,49 +37,65 @@ class TransformersLLMClient:
         device: str = "cuda",
         max_new_tokens: int = 512,
         temperature: float = 0.7,
+        gpu_id: int = None,
     ):
         """
-        Initialize the Transformers LLM client.
+        Initialize the LLM client.
 
         Args:
             model_name: Hugging Face model name
             device: Device to run model on ('cuda' or 'cpu')
             max_new_tokens: Maximum tokens to generate
             temperature: Sampling temperature
+            gpu_id: Specific GPU ID to use (None for auto)
         """
-        try:
-            from transformers import AutoModelForCausalLM, AutoTokenizer
-            import torch
-        except ImportError:
-            raise ImportError(
-                "Please install transformers and torch: pip install transformers torch"
-            )
-
+        from transformers import AutoTokenizer, AutoModelForCausalLM
+        import torch
+        
+        # Always use standard model loading for true batch generation
         self.model_name = model_name
         self.device = device
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
+        self.gpu_id = gpu_id
 
         print(f"Loading model: {model_name}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        
-        # Load model with FP16 for faster inference on GPU
+
+        # Load model with appropriate dtype
         # Use expandable_segments to avoid memory fragmentation
         import os
         os.environ['PYTORCH_ALLOC_CONF'] = 'expandable_segments:True'
-        
+
         model_kwargs = {
             "trust_remote_code": True,
-            "torch_dtype": torch.float16,
-            "device_map": "auto",
         }
-        
+
+        # Set dtype based on model and device
+        if device == "cuda":
+            # Use bfloat16 for A100 GPUs (better for gpt-oss-20b)
+            # Use float16 for older GPUs or Qwen models
+            if "gpt-oss" in model_name.lower() or "20b" in model_name.lower():
+                model_kwargs["torch_dtype"] = torch.bfloat16
+                print("  Using bfloat16 for GPT-OSS 20B")
+            else:
+                model_kwargs["torch_dtype"] = torch.float16
+                print("  Using float16")
+
+        # Set specific GPU if provided
+        if gpu_id is not None:
+            model_kwargs["device_map"] = f"cuda:{gpu_id}"
+            print(f"  Loading on GPU {gpu_id}")
+        else:
+            model_kwargs["device_map"] = "auto"
+
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
         print(f"Model loaded successfully on {device}")
 
     def generate(self, prompt: str, stop_sequences: Optional[List[str]] = None) -> str:
         """
         Generate response from the model.
+        Uses chat template for gpt-oss-20b, direct prompt for Qwen.
 
         Args:
             prompt: Input prompt string
@@ -87,15 +106,26 @@ class TransformersLLMClient:
         """
         import torch
 
-        inputs = self.tokenizer(prompt, return_tensors="pt")
-        if self.device == "cuda":
+        # Use chat template for gpt-oss-20b
+        if "gpt-oss" in self.model_name.lower():
+            messages = [{"role": "user", "content": prompt}]
+            prompt_text = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+        else:
+            prompt_text = prompt
+
+        # Tokenize
+        inputs = self.tokenizer(prompt_text, return_tensors="pt")
+        if hasattr(self, 'device') and self.device == "cuda":
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
         # Prepare stop sequences for transformers
         stopping_criteria = None
         if stop_sequences:
             from transformers import StoppingCriteriaList, StoppingCriteria
-            import re
 
             class StopOnSequence(StoppingCriteria):
                 def __init__(self, sequences, tokenizer):
@@ -114,7 +144,7 @@ class TransformersLLMClient:
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=self.max_new_tokens,
-                temperature=self.temperature,
+                temperature=self.temperature if self.temperature > 0 else None,
                 do_sample=self.temperature > 0,
                 pad_token_id=self.tokenizer.eos_token_id,
                 stopping_criteria=stopping_criteria,
@@ -128,7 +158,8 @@ class TransformersLLMClient:
     def generate_batch(self, prompts: List[str], stop_sequences: Optional[List[str]] = None) -> List[str]:
         """
         Generate responses for multiple prompts in batch (faster on A100).
-        Each prompt in the batch samples independently when temperature > 0.
+        Uses chat template for gpt-oss-20b, direct prompts for Qwen.
+        TRUE BATCH: All prompts processed in single model.forward() call.
 
         Args:
             prompts: List of input prompt strings
@@ -143,9 +174,23 @@ class TransformersLLMClient:
         if not prompts:
             return []
 
-        # Tokenize all prompts with padding
-        inputs = self.tokenizer(prompts, return_tensors="pt", padding=True)
-        if self.device == "cuda":
+        # Apply chat template for gpt-oss-20b if needed
+        if "gpt-oss" in self.model_name.lower():
+            processed_prompts = []
+            for prompt in prompts:
+                messages = [{"role": "user", "content": prompt}]
+                prompt_text = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True
+                )
+                processed_prompts.append(prompt_text)
+        else:
+            processed_prompts = prompts
+
+        # Tokenize all prompts with padding - TRUE BATCH
+        inputs = self.tokenizer(processed_prompts, return_tensors="pt", padding=True)
+        if hasattr(self, 'device') and self.device == "cuda":
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
         # Prepare stop sequences
@@ -164,24 +209,24 @@ class TransformersLLMClient:
                 StopOnSequence(stop_sequences, self.tokenizer)
             ])
 
-        # Batch generation with KV cache enabled
+        # Batch generation with KV cache enabled - ALL PROMPTS IN ONE FORWARD PASS
         with torch.inference_mode():
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=self.max_new_tokens,
-                temperature=self.temperature,
+                temperature=self.temperature if self.temperature > 0 else None,
                 do_sample=self.temperature > 0,
                 pad_token_id=self.tokenizer.eos_token_id,
                 stopping_criteria=stopping_criteria,
-                use_cache=True,
-                eos_token_id=self.tokenizer.eos_token_id,
             )
 
-        # Decode responses - extract only generated tokens for each
+        # Decode each generated sequence
+        input_lengths = [len(inp) for inp in inputs["input_ids"]]
         responses = []
-        for i, output in enumerate(outputs):
-            input_length = inputs["input_ids"][i].shape[0]
-            response = self.tokenizer.decode(output[input_length:], skip_special_tokens=True)
+        for i in range(len(prompts)):
+            input_len = input_lengths[i]
+            gen_ids = outputs[i][input_len:]
+            response = self.tokenizer.decode(gen_ids, skip_special_tokens=True)
             responses.append(response.strip())
 
         return responses
@@ -200,29 +245,33 @@ class MultiModelManager:
         max_new_tokens: int,
         temperature: float,
         num_copies: int = 4,
+        gpu_id: int = None,
     ):
         """
         Initialize multiple model copies.
-        
+
         Args:
             model_name: Hugging Face model name
             device: Device ('cuda')
             max_new_tokens: Maximum tokens to generate
             temperature: Sampling temperature
             num_copies: Number of model copies to load
+            gpu_id: Specific GPU ID to use (None for auto)
         """
         import torch
-        
+
         self.num_copies = num_copies
         self.device = device
+        self.gpu_id = gpu_id
         self.models: List[TransformersLLMClient] = []
-        
+
         print(f"Loading {num_copies} model copies for parallel generation...")
         print(f"  Model: {model_name}")
         print(f"  Device: {device}")
+        print(f"  GPU ID: {gpu_id if gpu_id is not None else 'auto'}")
         print(f"  Max tokens: {max_new_tokens}")
         print(f"  Temperature: {temperature}")
-        
+
         for i in range(num_copies):
             print(f"  Loading model copy {i+1}/{num_copies}...")
             model = TransformersLLMClient(
@@ -230,17 +279,21 @@ class MultiModelManager:
                 device=device,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
+                gpu_id=gpu_id,
             )
             self.models.append(model)
-            
+
             # Clear cache after each model load to prevent fragmentation
             import gc
             import torch
             gc.collect()
             torch.cuda.empty_cache()
-        
+
         print(f"All {num_copies} model copies loaded successfully")
-        print(f"  Estimated VRAM usage: ~{num_copies * 14} GB")
+        if gpu_id is not None:
+            print(f"  Estimated VRAM usage on GPU {gpu_id}: ~{num_copies * 14} GB")
+        else:
+            print(f"  Estimated VRAM usage: ~{num_copies * 14} GB")
     
     def generate_parallel(self, prompts: List[str], stop_sequences: Optional[List[str]] = None, batch_size: int = 8) -> List[str]:
         """
