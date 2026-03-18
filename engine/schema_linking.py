@@ -563,7 +563,8 @@ Your answer must be a SINGLE valid JSON object with this EXACT structure:
     "tables": ["table1", "table2"]
 }}
 
-### Your Answer:"""
+### Your Answer:
+{{"""
         return prompt
 
     def build_column_linking_prompt(
@@ -615,7 +616,8 @@ Your answer must be a SINGLE valid JSON object with this EXACT structure:
     "columns": ["table_name_i.column_name_j", ...]
 }}
 
-### Your Answer:"""
+### Your Answer:
+{{"""
         return prompt
 
     def parse_llm_response(self, response: str, task_type: str) -> Dict[str, Any]:
@@ -646,8 +648,14 @@ Your answer must be a SINGLE valid JSON object with this EXACT structure:
             # Find the JSON object - extract only the JSON, ignore everything else
             start_idx = response.find("{")
             if start_idx == -1:
-                print(f"  [DEBUG] No '{{' found in response!")
-                return {"reasoning": "", "tables" if task_type == "table" else "columns": []}
+                # If we forced the start with '{', the response might start immediately with the content
+                if not response.strip().startswith("{"):
+                    response = "{" + response.strip()
+                    start_idx = 0
+                else:
+                    print(f"  [DEBUG] No '{{' found in response!")
+                    return {"reasoning": "", "tables" if task_type == "table" else "columns": []}
+
             
             # Find matching closing brace by counting braces, ignoring content in strings
             brace_count = 0
