@@ -546,7 +546,7 @@ Your answer should strictly follow the following json format.
     "tables": [], // List of selected tables.
 }}
 
-### Your Answer:"""
+### Your Answer (JSON ONLY, no other text):"""
         return prompt
 
     def build_column_linking_prompt(
