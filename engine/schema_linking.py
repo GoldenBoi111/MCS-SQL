@@ -306,6 +306,12 @@ class MultiModelManager:
                 gpu_id=gpu_id,
             )
             self.models.append(model)
+            
+            # Debug: Show memory after each copy
+            if torch.cuda.is_available():
+                gpu = gpu_id if gpu_id is not None else 0
+                alloc = torch.cuda.memory_allocated(gpu) / 1e9
+                print(f"    After copy {i+1}: GPU memory = {alloc:.2f}GB")
 
             # Clear cache after each model load to prevent fragmentation
             import gc
@@ -315,9 +321,9 @@ class MultiModelManager:
 
         print(f"All {num_copies} model copies loaded successfully")
         if gpu_id is not None:
-            print(f"  Estimated VRAM usage on GPU {gpu_id}: ~{num_copies * 14} GB")
+            print(f"  Estimated VRAM usage on GPU {gpu_id}: ~{num_copies * 40} GB")
         else:
-            print(f"  Estimated VRAM usage: ~{num_copies * 14} GB")
+            print(f"  Estimated VRAM usage: ~{num_copies * 40} GB")
     
     def generate_parallel(self, prompts: List[str], stop_sequences: Optional[List[str]] = None, batch_size: int = 8) -> List[str]:
         """

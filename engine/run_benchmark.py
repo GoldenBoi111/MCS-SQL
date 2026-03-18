@@ -199,6 +199,14 @@ def run_benchmark(
         num_copies=num_copies,
         gpu_id=gpu_id,  # Pass GPU ID for multi-GPU support
     )
+    
+    # Debug: Verify model copies and memory
+    print(f"  ✓ Model copies loaded: {len(multi_model.models)}")
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated(gpu_id if gpu_id is not None else 0) / 1e9
+        reserved = torch.cuda.memory_reserved(gpu_id if gpu_id is not None else 0) / 1e9
+        print(f"  ✓ GPU Memory after load: Allocated={allocated:.2f}GB, Reserved={reserved:.2f}GB")
+        print(f"  ✓ Expected: ~{len(multi_model.models) * 40:.0f}GB for model weights")
 
     # Use first model for schema linker (single-threaded)
     # But pass multi_model for batch generation capability
