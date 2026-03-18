@@ -195,7 +195,7 @@ def run_benchmark(
         model_name=config.LLM_MODEL_NAME,
         device=config.LLM_DEVICE,
         max_new_tokens=512,
-        temperature=0.3,  # Balance between diversity and speed
+        temperature=config.LLM_TEMPERATURE,  # Use config temperature
         num_copies=num_copies,
         gpu_id=gpu_id,  # Pass GPU ID for multi-GPU support
     )

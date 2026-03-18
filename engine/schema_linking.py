@@ -69,6 +69,7 @@ class TransformersLLMClient:
 
         model_kwargs = {
             "trust_remote_code": True,
+            "attn_implementation": "flash_attention_2",
         }
 
         # Set dtype based on model and device
@@ -311,7 +312,8 @@ class MultiModelManager:
             import gc
             import torch
             gc.collect()
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         print(f"All {num_copies} model copies loaded successfully")
         if gpu_id is not None:
