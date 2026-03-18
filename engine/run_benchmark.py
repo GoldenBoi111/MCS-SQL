@@ -12,15 +12,20 @@ Returns queries with confidence > 0.2.
 """
 
 import argparse
+import gc
 import json
 import logging
 import os
 import random
+import re
 import sqlite3
+import statistics
 import time
 from collections import Counter
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
+
+import torch
 
 from config import Config
 from literal_masker import LiteralMasker
