@@ -307,10 +307,12 @@ def run_benchmark(
         
         # Format the linked schema for the generator prompt
         linked_schema_dict = {t: full_schema[t] for t in linking_res.tables if t in full_schema}
-        # Filter down columns as well if your linking_res.columns specifies them
-        # (For simplicity here, we inject all columns of selected tables, or you can filter exactly)
         schema_text = linker.format_schema_for_prompt(linked_schema_dict)
         print(f"  Schema Linking took {time.time() - t0:.2f}s (Found {len(linking_res.tables)} tables)")
+        
+        # Cleanup large dictionary after building schema text
+        del full_schema
+        del linked_schema_dict
         
         # 2. Retrieve Examples (k=20)
         print("  Retrieving examples from FAISS...")
@@ -330,6 +332,11 @@ def run_benchmark(
             {"question": mq, "sql": msql, "orig_question": oq, "orig_sql": osql, "metadata": meta}
             for (mq, oq, msql, osql, meta, score) in masked_results
         ]
+        
+        # Cleanup raw search results and masked question after processing
+        del standard_results
+        del masked_results
+        del masked_q
         
         # 3. Build 5 Prompt Variations
         print(f"  Standard examples: {len(std_examples)}, Masked examples: {len(msk_examples)}")
@@ -354,6 +361,10 @@ def run_benchmark(
                 mixed += random.sample(rem_pool, min(10 - len(mixed), len(rem_pool)))
             random.shuffle(mixed)
             prompt_variations.append((f"mixed_{i}", mixed))
+        
+        # Cleanup examples after building prompt variations
+        del std_examples
+        del msk_examples
         
         print(f"  Built {len(prompt_variations)} prompt variations")
         for pname, pex in prompt_variations:
@@ -388,10 +399,15 @@ def run_benchmark(
                 all_prompts.append(base_prompt)
                 prompt_metadata.append((p_name, gen_idx))
         
+        # Cleanup prompt building intermediates
+        del prompt_variations
+        if 'ex_text' in locals(): del ex_text
+        if 'base_prompt' in locals(): del base_prompt
+        
         print(f"  Built {len(all_prompts)} prompts for parallel generation...")
 
-        # Generate all 100 responses in parallel using 2 model copies with batch size 6
-        print("  Running parallel batch generation across 2 models (batch_size=6)...")
+        # Generate all 100 responses in parallel using model copies with batch size 6
+        print("  Running parallel batch generation (batch_size=6)...")
         
         # Check GPU memory before generation
         is_low, free_gb, allocated_gb = check_gpu_memory(threshold_gb=10.0)
@@ -401,13 +417,11 @@ def run_benchmark(
         
         # Try generation with error handling
         all_responses = []
-        generation_error = None
         
         try:
             all_responses = multi_model.generate_parallel(all_prompts, stop_sequences=None, batch_size=6)
         except RuntimeError as e:
             if "CUDA out of memory" in str(e):
-                generation_error = e
                 print(f"\n[CUDA OOM] Generation failed, attempting recovery...")
                 
                 # Log the error
@@ -416,8 +430,6 @@ def run_benchmark(
                     "question_id": q_idx,
                     "batch_size": 6,
                     "num_prompts": len(all_prompts),
-                    "free_gb": free_gb,
-                    "allocated_gb": allocated_gb,
                 })
                 
                 # Try with smaller batch size and CPU offloading
@@ -426,16 +438,13 @@ def run_benchmark(
                     # Clear memory first
                     clear_gpu_memory(verbose=True)
                     
-                    # Offload model weights temporarily (if possible)
+                    # Offload model weights temporarily to free VRAM for batch processing
                     import torch
-                    model_on_cpu = {}
+                    model_devices = {}
                     for idx, model_wrapper in enumerate(multi_model.models):
                         if hasattr(model_wrapper, 'model'):
-                            model_on_cpu[idx] = {
-                                'weights': model_wrapper.model.state_dict(),
-                                'device': next(model_wrapper.model.parameters()).device,
-                            }
-                            model_wrapper.model = model_wrapper.model.cpu()
+                            model_devices[idx] = next(model_wrapper.model.parameters()).device
+                            model_wrapper.model.cpu() 
                     
                     torch.cuda.empty_cache()
                     
@@ -444,8 +453,8 @@ def run_benchmark(
                     
                     # Restore model to GPU
                     for idx, model_wrapper in enumerate(multi_model.models):
-                        if idx in model_on_cpu and hasattr(model_wrapper, 'model'):
-                            model_wrapper.model.to(model_on_cpu[idx]['device'])
+                        if idx in model_devices and hasattr(model_wrapper, 'model'):
+                            model_wrapper.model.to(model_devices[idx])
                     
                     print("  Recovery successful!")
                     
@@ -458,6 +467,11 @@ def run_benchmark(
                     all_responses = [""] * len(all_prompts)  # Empty responses
             else:
                 raise  # Re-raise non-OOM errors
+
+        # IMMEDIATELY clear prompts after generation completes to free space for execution phase
+        del all_prompts
+        gc.collect()
+        torch.cuda.empty_cache()
         
         # Parse responses and extract SQL
         print("  Parsing responses...")
@@ -538,6 +552,12 @@ def run_benchmark(
                 print(f"    Parse error: {e}")
                     
         print(f"  Generated {len(generated_candidates)} valid SQL candidates")
+
+        # Cleanup raw responses after extraction
+        del all_responses
+        del prompt_metadata
+        gc.collect()
+        torch.cuda.empty_cache()
 
         # 5. Execute and perform Majority Voting
         # Store all execution results with timing for each generated candidate
@@ -723,6 +743,11 @@ def run_benchmark(
                 else:
                     raise
             
+            # Cleanup selection prompts immediately after responses are gotten
+            del selection_prompts
+            gc.collect()
+            torch.cuda.empty_cache()
+            
             # Parse all responses
             print(f"    Parsing {len(selection_responses)} selection responses...")
             for sel_idx, selection_response in enumerate(selection_responses):
@@ -811,6 +836,10 @@ def run_benchmark(
                 
                 print(f"    Majority vote: {selected_sql[:150]}... ({vote_count}/{len(selection_votes)} votes)")
                 representative_sql = selected_sql
+                
+                # Cleanup selection data after majority voting
+                del selection_votes
+                del selection_responses
             else:
                 print("    No valid selection responses, keeping majority vote result")
         else:
@@ -1000,7 +1029,7 @@ def generate_detailed_report(results: List[Dict], output_dir: str):
             all_exec_times.extend(r["execution_times"])
     
     if all_exec_times:
-        print(f"\n⏱️  EXECUTION TIME STATISTICS (All SQL Queries)")
+        print(f"\nEXECUTION TIME STATISTICS (All SQL Queries)")
         print("-"*100)
         print(f"  Total Queries Executed:  {len(all_exec_times)}")
         print(f"  Mean Execution Time:     {statistics.mean(all_exec_times)*1000:.2f} ms")

@@ -6,10 +6,10 @@ The MCS-SQL benchmark now generates comprehensive reports with detailed statisti
 
 ## Report Sections
 
-### 1. 📊 OVERALL STATISTICS
+### 1. OVERALL STATISTICS
 
 ```
-📊 OVERALL STATISTICS
+OVERALL STATISTICS
 ----------------------------------------------------------------------------------------------------
   Total Questions:     500
   Correct:             325 (65.00%)

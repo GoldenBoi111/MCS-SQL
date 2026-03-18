@@ -286,13 +286,13 @@ jq '[.[] | select(.db_id == "car_retails")]' outputs/benchmark_gpt_oss_20b/bench
                               DETAILED BENCHMARK REPORT
 ====================================================================================================
 
-📊 OVERALL STATISTICS
+OVERALL STATISTICS
 ----------------------------------------------------------------------------------------------------
   Total Questions:     500
   Correct:             340 (68.00%)
   Incorrect:           160 (32.00%)
 
-⏱️  EXECUTION TIME STATISTICS (All SQL Queries)
+EXECUTION TIME STATISTICS (All SQL Queries)
 ----------------------------------------------------------------------------------------------------
   Total Queries Executed:  50,000
   Mean Execution Time:     11.23 ms
