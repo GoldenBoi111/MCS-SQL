@@ -23,17 +23,20 @@ question.
 5. Check if the operations are being performed correctly according to the column
 type.
 
-### Instruction:
-- If the first SQL satisfies all the conditions of the checklist, please choose the
-first SQL. If not, move on to the next SQL.
-- If there's no SQL that satisfies all the requirements on the checklist, just
-choose the first SQL.
-- Provide a detailed step-by-step explanation following the order of the checklist
-when checking whether each SQL satisfies the checklist.
-- Your answer should strictly follow the following json format.
+### INSTRUCTIONS - READ CAREFULLY:
+- Analyze each SQL candidate systematically using the checklist
+- Choose the best SQL (or first SQL if none satisfy all requirements)
+- You MUST output ONLY a valid JSON object. NO other text is allowed.
+- Do NOT include any explanations before or after the JSON
+- Do NOT include markdown code fences like ```json or ```
+- Do NOT include any introductory phrases like "Here is my analysis" or "Sure!"
+- Your ENTIRE response must be ONLY the JSON object starting with {{ and ending with }}
+- Make your BEST effort to provide valid JSON output with the correct SQL selection
+
+Your answer must be a SINGLE valid JSON object with this EXACT structure:
 {{
-    "reasoning": "", // The reasoning steps for choosing the best SQL.
-    "sql": "", // The final chosen SQL.
+    "reasoning": "Concise, professional checklist-based analysis justifying the selection.",
+    "sql": "The final chosen SQL query."
 }}
 
 ### Your Answer:

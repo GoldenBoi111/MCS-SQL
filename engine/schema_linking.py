@@ -36,7 +36,7 @@ class TransformersLLMClient:
         model_name: str = "Qwen/Qwen2.5-7B-Instruct",
         device: str = "cuda",
         max_new_tokens: int = 512,
-        temperature: float = 0.7,
+        temperature: float = 0.3,
         gpu_id: int = None,
     ):
         """
@@ -46,12 +46,12 @@ class TransformersLLMClient:
             model_name: Hugging Face model name
             device: Device to run model on ('cuda' or 'cpu')
             max_new_tokens: Maximum tokens to generate
-            temperature: Sampling temperature
+            temperature: Sampling temperature (0.3 for focused generation)
             gpu_id: Specific GPU ID to use (None for auto)
         """
         from transformers import AutoTokenizer, AutoModelForCausalLM
         import torch
-        
+
         # Always use standard model loading for true batch generation
         self.model_name = model_name
         self.device = device
@@ -69,7 +69,6 @@ class TransformersLLMClient:
 
         model_kwargs = {
             "trust_remote_code": True,
-            "attn_implementation": "flash_attention_2",
         }
 
         # Set dtype based on model and device
@@ -92,7 +91,6 @@ class TransformersLLMClient:
 
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
         print(f"Model loaded successfully on {device}")
-
     def generate(self, prompt: str, stop_sequences: Optional[List[str]] = None) -> str:
         """
         Generate response from the model.
@@ -120,8 +118,9 @@ class TransformersLLMClient:
 
         # Tokenize
         inputs = self.tokenizer(prompt_text, return_tensors="pt")
-        if hasattr(self, 'device') and self.device == "cuda":
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        # Route inputs to whatever device the model actually lives on
+        model_device = next(self.model.parameters()).device
+        inputs = {k: v.to(model_device) for k, v in inputs.items()}
 
         # Prepare stop sequences for transformers
         stopping_criteria = None
@@ -190,9 +189,14 @@ class TransformersLLMClient:
             processed_prompts = prompts
 
         # Tokenize all prompts with padding - TRUE BATCH
+        # CRITICAL: padding_side='left' is required for correct batch generation.
+        # Without it, padding tokens are added on the right, which corrupts the
+        # auto-regressive generation and causes blank/truncated outputs.
+        self.tokenizer.padding_side = "left"
         inputs = self.tokenizer(processed_prompts, return_tensors="pt", padding=True)
-        if hasattr(self, 'device') and self.device == "cuda":
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        # Route inputs to whatever device the model actually lives on
+        model_device = next(self.model.parameters()).device
+        inputs = {k: v.to(model_device) for k, v in inputs.items()}
 
         # Prepare stop sequences
         stopping_criteria = None
@@ -237,11 +241,13 @@ class TransformersLLMClient:
                 raise
 
         # Decode each generated sequence
-        input_lengths = [len(inp) for inp in inputs["input_ids"]]
+        # CRITICAL: Use the padded tensor shape per-row, not len() on tensor rows.
+        # inputs["input_ids"] is a 2D tensor of shape (batch, seq_len) - each row
+        # has the same padded length, so we read the dimension directly.
+        padded_input_len = inputs["input_ids"].shape[1]
         responses = []
         for i in range(len(prompts)):
-            input_len = input_lengths[i]
-            gen_ids = outputs[i][input_len:]
+            gen_ids = outputs[i][padded_input_len:]
             response = self.tokenizer.decode(gen_ids, skip_special_tokens=True)
             responses.append(response.strip())
 
@@ -543,12 +549,18 @@ tables that should be referenced to convert the question into SQL.
 ### Knowledge Evidence:
 {evidence if evidence else "None provided"}
 
-You need to not only select the required tables, but also explain in detail why each
-table is needed.
-Your answer should strictly follow the following json format.
+### INSTRUCTIONS - READ CAREFULLY:
+- Identify the required tables and provide concise, professional justification
+- You MUST output ONLY a valid JSON object. NO other text is allowed.
+- Do NOT include any explanations before or after the JSON
+- Do NOT include markdown code fences like ```json or ```
+- Your ENTIRE response must be ONLY the JSON object starting with {{ and ending with }}
+- Make your BEST effort to provide valid JSON output
+
+Your answer must be a SINGLE valid JSON object with this EXACT structure:
 {{
-    "reasoning": "", // The reason for choosing each table.
-    "tables": [], // List of selected tables.
+    "reasoning": "Concise, professional justification for table selection.",
+    "tables": ["table1", "table2"]
 }}
 
 ### Your Answer:"""
@@ -589,12 +601,18 @@ columns that should be referenced to convert the question into SQL.
 ### Knowledge Evidence:
 {evidence if evidence else "None provided"}
 
-You need to not only select the required columns, but also explain in detail why
-each column is needed.
-Your answer should strictly follow the following json format.
+### INSTRUCTIONS - READ CAREFULLY:
+- Identify the required columns and provide concise, professional justification
+- You MUST output ONLY a valid JSON object. NO other text is allowed.
+- Do NOT include any explanations before or after the JSON
+- Do NOT include markdown code fences like ```json or ```
+- Your ENTIRE response must be ONLY the JSON object starting with {{ and ending with }}
+- Make your BEST effort to provide valid JSON output
+
+Your answer must be a SINGLE valid JSON object with this EXACT structure:
 {{
-    "reasoning": "", // The reason for choosing each column.
-    "columns": ["table_name_i.column_name_j", ...], // List of selected columns
+    "reasoning": "Concise, professional justification for column selection.",
+    "columns": ["table_name_i.column_name_j", ...]
 }}
 
 ### Your Answer:"""
@@ -767,7 +785,7 @@ Your answer should strictly follow the following json format.
         if hasattr(self.llm_client, 'generate_parallel'):
             # Use parallel batch generation (MultiModelManager)
             print(f"    Table linking: generating {len(all_prompts)} responses in parallel...")
-            all_responses = self.llm_client.generate_parallel(all_prompts, stop_sequences=None, batch_size=8)
+            all_responses = self.llm_client.generate_parallel(all_prompts, stop_sequences=None, batch_size=4)
 
             # Parse all responses
             print(f"    Parsing {len(all_responses)} table linking responses...")
@@ -839,7 +857,7 @@ Your answer should strictly follow the following json format.
         if hasattr(self.llm_client, 'generate_parallel'):
             # Use parallel batch generation (MultiModelManager)
             print(f"    Column linking: generating {len(all_prompts)} responses in parallel...")
-            all_responses = self.llm_client.generate_parallel(all_prompts, stop_sequences=None, batch_size=8)
+            all_responses = self.llm_client.generate_parallel(all_prompts, stop_sequences=None, batch_size=4)
             
             # Parse all responses
             print(f"    Parsing {len(all_responses)} column linking responses...")

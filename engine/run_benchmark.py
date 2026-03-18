@@ -199,8 +199,8 @@ def run_benchmark(
     multi_model = MultiModelManager(
         model_name=config.LLM_MODEL_NAME,
         device=config.LLM_DEVICE,
-        max_new_tokens=512,
-        temperature=0.3,  # Balance between diversity and speed
+        max_new_tokens=config.LLM_MAX_NEW_TOKENS,
+        temperature=config.LLM_TEMPERATURE,
         num_copies=num_copies,
         gpu_id=gpu_id,  # Pass GPU ID for multi-GPU support
     )
@@ -222,7 +222,7 @@ def run_benchmark(
     linker = SchemaLinker(
         pt=config.TABLE_LINKING_ITERATIONS,
         pc=config.COLUMN_LINKING_ITERATIONS,
-        n=20,  # 20 parallel outputs per iteration for robust schema linking
+        n=config.MAJORITY_VOTE_N,
         llm_client=multi_model,  # Use multi_model for batch generation
     )
 
@@ -399,8 +399,8 @@ def run_benchmark(
                 .replace("{evidence}", evidence)
             )
             
-            # Create 20 copies of this prompt (each will sample independently)
-            for gen_idx in range(20):
+            # Create config.MAJORITY_VOTE_N copies of this prompt (each will sample independently)
+            for gen_idx in range(config.MAJORITY_VOTE_N):
                 all_prompts.append(base_prompt)
                 prompt_metadata.append((p_name, gen_idx))
         
@@ -411,20 +411,20 @@ def run_benchmark(
         
         print(f"  Built {len(all_prompts)} prompts for parallel generation...")
 
-        # Generate all 100 responses in parallel using model copies with batch size 8
-        print("  Running parallel batch generation (batch_size=8)...")
-        
+        # Generate all responses in parallel using model copies
+        print("  Running parallel batch generation (batch_size=4)...")
+
         # Check GPU memory before generation
         is_low, free_gb, allocated_gb = check_gpu_memory(threshold_gb=10.0)
         if is_low:
             print(f"  [WARNING] GPU memory low before generation: {free_gb:.2f}GB free")
             clear_gpu_memory(verbose=True)
-        
+
         # Try generation with error handling
         all_responses = []
 
         try:
-            all_responses = multi_model.generate_parallel(all_prompts, stop_sequences=None, batch_size=8)
+            all_responses = multi_model.generate_parallel(all_prompts, stop_sequences=None, batch_size=4)
         except RuntimeError as e:
             if "CUDA out of memory" in str(e):
                 print(f"\n[CUDA OOM] Generation failed, attempting recovery...")
@@ -433,12 +433,12 @@ def run_benchmark(
                 error_logger.log_cuda_error(e, {
                     "phase": "SQL_GENERATION",
                     "question_id": q_idx,
-                    "batch_size": 8,
+                    "batch_size": 4,
                     "num_prompts": len(all_prompts),
                 })
 
-                # Try with smaller batch size and CPU offloading
-                print("  Retrying with batch_size=4 and CPU offloading...")
+                # Retry with smaller batch size and CPU offloading
+                print("  Retrying with batch_size=2 and CPU offloading...")
                 try:
                     # Clear memory first
                     clear_gpu_memory(verbose=True)
@@ -453,15 +453,15 @@ def run_benchmark(
                     torch.cuda.empty_cache()
 
                     # Retry with smaller batch
-                    all_responses = multi_model.generate_parallel(all_prompts, stop_sequences=None, batch_size=4)
-                    
+                    all_responses = multi_model.generate_parallel(all_prompts, stop_sequences=None, batch_size=2)
+
                     # Restore model to GPU
                     for idx, model_wrapper in enumerate(multi_model.models):
                         if idx in model_devices and hasattr(model_wrapper, 'model'):
                             model_wrapper.model.to(model_devices[idx])
-                    
+
                     print("  Recovery successful!")
-                    
+
                 except Exception as recovery_error:
                     print(f"  Recovery failed: {recovery_error}")
                     error_logger.log_cuda_error(recovery_error, {
@@ -607,14 +607,61 @@ def run_benchmark(
         print(f"  Valid executing queries: {N_valid} (Errors: {execution_errors})")
 
         if N_valid == 0:
-            print("  No queries executed successfully.")
-            results_detail.append({
+            print("  No queries executed successfully. Saving failure result...")
+            
+            # Save comprehensive failure result with all available info
+            failure_result = {
                 "question_id": q.get("question_id", q_idx),
                 "question": question,
-                "winner_sql": "SELECT 1",
-                "correct": False,
-                "confidence": 0.0
-            })
+                "db_id": db_id,
+                "difficulty": difficulty,
+                "ground_truth": ground_truth,
+                "winner_sql": None,
+                "is_correct": False,
+                "winner_confidence": 0.0,
+                "execution_times": [],
+                "high_confidence_alternatives": [],
+                "selection": {
+                    "selected_sql": None,
+                    "reasoning": None,
+                    "candidates_count": 0
+                },
+                "metrics": {
+                    "generated": len(generated_candidates),
+                    "execution_errors": execution_errors,
+                    "valid_generations": 0,
+                    "unique_valid_sqls": 0
+                },
+                "failure_info": {
+                    "phase": "EXECUTION",
+                    "reason": "No queries executed successfully - all generated SQL had syntax errors or timeouts",
+                    "generated_candidates_sample": [
+                        {"sql": cand["sql"], "prompt_type": cand["prompt_type"]} 
+                        for cand in generated_candidates[:10]
+                    ] if generated_candidates else [],
+                    "error_count": execution_errors
+                }
+            }
+            
+            results_detail.append(failure_result)
+            
+            # Save intermediate results immediately on failure
+            results_file = os.path.join(output_dir, "benchmark_results.json")
+            with open(results_file, "w") as f:
+                json.dump(results_detail, f, indent=2)
+            print(f"  Saved failure result to {results_file}")
+            
+            # Track as incorrect for difficulty stats
+            difficulty_results[difficulty].append(False)
+            
+            # Continue to next question with memory cleanup
+            if 'generated_candidates' in locals(): del generated_candidates
+            if 'all_executions' in locals(): del all_executions
+            if 'sql_to_result_cache' in locals(): del sql_to_result_cache
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
             continue
 
         # Group executions by result_set and track best (minimum) execution time per group
@@ -719,8 +766,8 @@ def run_benchmark(
             print(f"    Selection prompt: {selection_prompt[:300]}...")
             print(f"    Candidates (confidence > 0.2): {len(selection_candidates)}")
 
-            # Sample n=20 responses from LLM for majority voting using parallel generation
-            n_selection_samples = 20
+            # Sample config.MAJORITY_VOTE_N responses from LLM for majority voting
+            n_selection_samples = config.MAJORITY_VOTE_N
             selection_votes = []
 
             print(f"    Generating {n_selection_samples} selection responses in parallel...")
@@ -732,7 +779,7 @@ def run_benchmark(
             selection_responses = []
             
             try:
-                selection_responses = multi_model.generate_parallel(selection_prompts, stop_sequences=None, batch_size=8)
+                selection_responses = multi_model.generate_parallel(selection_prompts, stop_sequences=None, batch_size=4)
             except RuntimeError as e:
                 if "CUDA out of memory" in str(e):
                     print(f"\n[CUDA OOM] Selection failed, attempting recovery...")
@@ -740,14 +787,14 @@ def run_benchmark(
                     error_logger.log_cuda_error(e, {
                         "phase": "SQL_SELECTION",
                         "question_id": q_idx,
-                        "batch_size": 8,
+                        "batch_size": 4,
                         "num_prompts": len(selection_prompts),
                     })
                     
                     # Retry with smaller batch
                     try:
                         clear_gpu_memory(verbose=True)
-                        selection_responses = multi_model.generate_parallel(selection_prompts, stop_sequences=None, batch_size=4)
+                        selection_responses = multi_model.generate_parallel(selection_prompts, stop_sequences=None, batch_size=2)
                         print("  Selection recovery successful!")
                     except Exception as recovery_error:
                         error_logger.log_cuda_error(recovery_error, {
