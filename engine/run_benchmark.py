@@ -173,7 +173,6 @@ def run_benchmark(
 
     # Set GPU device if specified
     if gpu_id is not None:
-        import torch
         torch.cuda.set_device(gpu_id)
         print(f"Running on GPU {gpu_id}")
 
@@ -412,8 +411,8 @@ def run_benchmark(
         
         print(f"  Built {len(all_prompts)} prompts for parallel generation...")
 
-        # Generate all 100 responses in parallel using model copies with batch size 6
-        print("  Running parallel batch generation (batch_size=6)...")
+        # Generate all 100 responses in parallel using model copies with batch size 8
+        print("  Running parallel batch generation (batch_size=8)...")
         
         # Check GPU memory before generation
         is_low, free_gb, allocated_gb = check_gpu_memory(threshold_gb=10.0)
@@ -423,38 +422,38 @@ def run_benchmark(
         
         # Try generation with error handling
         all_responses = []
-        
+
         try:
-            all_responses = multi_model.generate_parallel(all_prompts, stop_sequences=None, batch_size=6)
+            all_responses = multi_model.generate_parallel(all_prompts, stop_sequences=None, batch_size=8)
         except RuntimeError as e:
             if "CUDA out of memory" in str(e):
                 print(f"\n[CUDA OOM] Generation failed, attempting recovery...")
-                
+
                 # Log the error
                 error_logger.log_cuda_error(e, {
                     "phase": "SQL_GENERATION",
                     "question_id": q_idx,
-                    "batch_size": 6,
+                    "batch_size": 8,
                     "num_prompts": len(all_prompts),
                 })
-                
+
                 # Try with smaller batch size and CPU offloading
-                print("  Retrying with batch_size=2 and CPU offloading...")
+                print("  Retrying with batch_size=4 and CPU offloading...")
                 try:
                     # Clear memory first
                     clear_gpu_memory(verbose=True)
-                    
+
                     # Offload model weights temporarily to free VRAM for batch processing
                     model_devices = {}
                     for idx, model_wrapper in enumerate(multi_model.models):
                         if hasattr(model_wrapper, 'model'):
                             model_devices[idx] = next(model_wrapper.model.parameters()).device
-                            model_wrapper.model.cpu() 
-                    
+                            model_wrapper.model.cpu()
+
                     torch.cuda.empty_cache()
-                    
+
                     # Retry with smaller batch
-                    all_responses = multi_model.generate_parallel(all_prompts, stop_sequences=None, batch_size=2)
+                    all_responses = multi_model.generate_parallel(all_prompts, stop_sequences=None, batch_size=4)
                     
                     # Restore model to GPU
                     for idx, model_wrapper in enumerate(multi_model.models):
@@ -722,7 +721,7 @@ def run_benchmark(
             selection_responses = []
             
             try:
-                selection_responses = multi_model.generate_parallel(selection_prompts, stop_sequences=None, batch_size=6)
+                selection_responses = multi_model.generate_parallel(selection_prompts, stop_sequences=None, batch_size=8)
             except RuntimeError as e:
                 if "CUDA out of memory" in str(e):
                     print(f"\n[CUDA OOM] Selection failed, attempting recovery...")
@@ -730,14 +729,14 @@ def run_benchmark(
                     error_logger.log_cuda_error(e, {
                         "phase": "SQL_SELECTION",
                         "question_id": q_idx,
-                        "batch_size": 6,
+                        "batch_size": 8,
                         "num_prompts": len(selection_prompts),
                     })
                     
                     # Retry with smaller batch
                     try:
                         clear_gpu_memory(verbose=True)
-                        selection_responses = multi_model.generate_parallel(selection_prompts, stop_sequences=None, batch_size=2)
+                        selection_responses = multi_model.generate_parallel(selection_prompts, stop_sequences=None, batch_size=4)
                         print("  Selection recovery successful!")
                     except Exception as recovery_error:
                         error_logger.log_cuda_error(recovery_error, {
@@ -981,16 +980,14 @@ def run_benchmark(
 
     # Final cleanup of persistent resources
     print("\nPerforming final cleanup of persistent resources...")
-    import gc
-    import torch
-    
+
     # Delete primary controllers
     if 'multi_model' in locals(): del multi_model
     if 'linker' in locals(): del linker
     if 'standard_indexer' in locals(): del standard_indexer
     if 'masked_indexer' in locals(): del masked_indexer
     if 'literal_masker' in locals(): del literal_masker
-    
+
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
