@@ -749,16 +749,20 @@ Your answer should strictly follow the following json format.
         # Check if we have batch generation capability
         print(f"    DEBUG: llm_client type = {type(self.llm_client).__name__}")
         print(f"    DEBUG: has generate_parallel = {hasattr(self.llm_client, 'generate_parallel')}")
-        
+
         if hasattr(self.llm_client, 'generate_parallel'):
             # Use parallel batch generation (MultiModelManager)
             print(f"    Table linking: generating {len(all_prompts)} responses in parallel...")
             all_responses = self.llm_client.generate_parallel(all_prompts, stop_sequences=None, batch_size=8)
-            
+
             # Parse all responses
+            print(f"    Parsing {len(all_responses)} table linking responses...")
             for idx, response in enumerate(all_responses):
                 parsed = self.parse_llm_response(response, "table")
                 results.append(parsed)
+                # Print first 3 responses for debugging
+                if idx < 3:
+                    print(f"      Response {idx+1}: tables={parsed.get('tables', [])}")
         else:
             # Sequential generation (fallback)
             print(f"    Table linking: generating {len(all_prompts)} responses sequentially...")
@@ -772,6 +776,7 @@ Your answer should strictly follow the following json format.
 
         # Union all results (no duplicates)
         tables, reasoning = self.union_results(results, "table")
+        print(f"    Table linking complete: selected {len(tables)} tables: {tables}")
 
         return tables, reasoning
 
@@ -823,9 +828,13 @@ Your answer should strictly follow the following json format.
             all_responses = self.llm_client.generate_parallel(all_prompts, stop_sequences=None, batch_size=8)
             
             # Parse all responses
-            for response in all_responses:
+            print(f"    Parsing {len(all_responses)} column linking responses...")
+            for idx, response in enumerate(all_responses):
                 parsed = self.parse_llm_response(response, "column")
                 results.append(parsed)
+                # Print first 3 responses for debugging
+                if idx < 3:
+                    print(f"      Response {idx+1}: columns={len(parsed.get('columns', []))} columns")
         else:
             # Sequential generation (fallback)
             print(f"    Column linking: generating {len(all_prompts)} responses sequentially...")
@@ -839,6 +848,7 @@ Your answer should strictly follow the following json format.
 
         # Union all results (no duplicates)
         columns, reasoning = self.union_results(results, "column")
+        print(f"    Column linking complete: selected {len(columns)} columns")
 
         return columns, reasoning
 

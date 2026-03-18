@@ -481,10 +481,10 @@ def run_benchmark(
         print("  Parsing responses...")
         for i, response in enumerate(all_responses):
             p_name, gen_idx = prompt_metadata[i]
-            
+
             try:
                 print(f"    Gen {i+1}/100 - Response length: {len(response)}")
-                
+
                 # Extract SQL from JSON - ignore everything that's not JSON
                 sql_query = ""
 
@@ -532,9 +532,18 @@ def run_benchmark(
                         try:
                             parsed = json.loads(json_str)
                             sql_query = parsed.get("sql", "")
-                            print(f"      Parsed SQL: {sql_query[:100] if sql_query else 'None'}...")
+                            if sql_query:
+                                print(f"      Parsed SQL: {sql_query[:100]}...")
+                            else:
+                                print(f"      JSON parsed but no 'sql' field. Keys: {list(parsed.keys())}")
+                                print(f"      Full JSON: {json_str[:300]}...")
                         except json.JSONDecodeError as je:
                             print(f"      JSON parse error: {je}")
+                            print(f"      Attempted JSON: {json_str[:200]}...")
+                    else:
+                        print(f"      No matching closing brace found")
+                else:
+                    print(f"      No '{{' found in response. First 200 chars: {response_stripped[:200]}...")
 
                 if not sql_query:
                     # Method 2: Regex fallback for SQL
@@ -543,6 +552,8 @@ def run_benchmark(
                     if match:
                         sql_query = match.group(0).strip()
                         print(f"      Regex extracted SQL: {sql_query[:100]}...")
+                    else:
+                        print(f"      Regex also failed. Response sample: {response[:150]}...")
 
                 if sql_query:
                     generated_candidates.append({
