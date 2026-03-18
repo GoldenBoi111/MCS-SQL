@@ -105,9 +105,13 @@ class TransformersLLMClient:
         """
         import torch
 
-        # Use chat template for gpt-oss-20b
-        if "gpt-oss" in self.model_name.lower():
-            messages = [{"role": "user", "content": prompt}]
+        # Standard chat template usage - no forcing as per user request
+        messages = [
+            {"role": "system", "content": "You are an expert SQL developer."},
+            {"role": "user", "content": prompt}
+        ]
+        
+        if self.tokenizer.chat_template is not None:
             prompt_text = self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
@@ -115,6 +119,7 @@ class TransformersLLMClient:
             )
         else:
             prompt_text = prompt
+
 
         # Tokenize
         inputs = self.tokenizer(prompt_text, return_tensors="pt")
@@ -527,45 +532,20 @@ class SchemaLinker:
         self, schema_text: str, question: str, evidence: str = ""
     ) -> str:
         """
-        Build prompt for table linking task.
-
-        Args:
-            schema_text: Formatted database schema
-            question: User's natural language question
-            evidence: Optional knowledge evidence
-
-        Returns:
-            Complete prompt string for table linking
+        Build prompt for table linking task using external template.
         """
-        prompt = f"""### Given a database schema, question, and knowledge evidence, extract a list of
-tables that should be referenced to convert the question into SQL.
-### SQLite SQL tables, with their properties:
+        import os
+        from config import PROMPTS_DIR
+        prompt_path = os.path.join(PROMPTS_DIR, "table_linking.txt")
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            template = f.read()
+            
+        return template.format(
+            schema_text=schema_text,
+            question=question,
+            evidence=evidence if evidence else "None provided"
+        )
 
-{schema_text}
-
-### Question:
-{question}
-
-### Knowledge Evidence:
-{evidence if evidence else "None provided"}
-
-### INSTRUCTIONS - READ CAREFULLY:
-- Identify the required tables and provide concise, professional justification
-- You MUST output ONLY a valid JSON object. NO other text is allowed.
-- Do NOT include any explanations before or after the JSON
-- Do NOT include markdown code fences like ```json or ```
-- Your ENTIRE response must be ONLY the JSON object starting with {{ and ending with }}
-- Make your BEST effort to provide valid JSON output
-
-Your answer must be a SINGLE valid JSON object with this EXACT structure:
-{{
-    "reasoning": "Concise, professional justification for table selection.",
-    "tables": ["table1", "table2"]
-}}
-
-### Your Answer:
-{{"""
-        return prompt
 
     def build_column_linking_prompt(
         self,
@@ -575,59 +555,30 @@ Your answer must be a SINGLE valid JSON object with this EXACT structure:
         evidence: str = "",
     ) -> str:
         """
-        Build prompt for column linking task.
-
-        Args:
-            schema_text: Formatted database schema (only selected tables)
-            question: User's natural language question
-            selected_tables: List of tables selected from table linking
-            evidence: Optional knowledge evidence
-
-        Returns:
-            Complete prompt string for column linking
+        Build prompt for column linking task using external template.
         """
+        import os
+        from config import PROMPTS_DIR
+        prompt_path = os.path.join(PROMPTS_DIR, "column_linking.txt")
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            template = f.read()
+            
         tables_str = ", ".join(selected_tables)
-        prompt = f"""### Given a database schema, question, and knowledge evidence, extract a list of
-columns that should be referenced to convert the question into SQL.
-### SQLite SQL tables, with their properties:
-
-{schema_text}
-
-### Selected Tables:
-{tables_str}
-
-### Question:
-{question}
-
-### Knowledge Evidence:
-{evidence if evidence else "None provided"}
-
-### INSTRUCTIONS - READ CAREFULLY:
-- Identify the required columns and provide concise, professional justification
-- You MUST output ONLY a valid JSON object. NO other text is allowed.
-- Do NOT include any explanations before or after the JSON
-- Do NOT include markdown code fences like ```json or ```
-- Your ENTIRE response must be ONLY the JSON object starting with {{ and ending with }}
-- Make your BEST effort to provide valid JSON output
-
-Your answer must be a SINGLE valid JSON object with this EXACT structure:
-{{
-    "reasoning": "Concise, professional justification for column selection.",
-    "columns": ["table_name_i.column_name_j", ...]
-}}
-
-### Your Answer:
-{{"""
-        return prompt
+        return template.format(
+            schema_text=schema_text,
+            question=question,
+            selected_tables=tables_str,
+            evidence=evidence if evidence else "None provided"
+        )
 
     def parse_llm_response(self, response: str, task_type: str) -> Dict[str, Any]:
         """
         Parse LLM response to extract JSON result.
-
+        
         Args:
             response: Raw LLM response string
             task_type: Either 'table' or 'column'
-
+            
         Returns:
             Parsed dictionary with reasoning and tables/columns
         """
@@ -639,80 +590,89 @@ Your answer must be a SINGLE valid JSON object with this EXACT structure:
         try:
             # Remove markdown code fences if present
             response = response.strip()
-            
             if response.startswith("```json"):
                 response = response[7:]
             elif response.startswith("```"):
                 response = response[3:]
-            
+                
             # Find the JSON object - extract only the JSON, ignore everything else
             start_idx = response.find("{")
             if start_idx == -1:
-                # If we forced the start with '{', the response might start immediately with the content
-                if not response.strip().startswith("{"):
-                    response = "{" + response.strip()
-                    start_idx = 0
-                else:
-                    print(f"  [DEBUG] No '{{' found in response!")
-                    return {"reasoning": "", "tables" if task_type == "table" else "columns": []}
-
-            
-            # Find matching closing brace by counting braces, ignoring content in strings
-            brace_count = 0
-            end_idx = -1
-            in_string = False
-            escape_next = False
-            
-            for i, char in enumerate(response[start_idx:], start_idx):
-                if escape_next:
-                    escape_next = False
-                    continue
-                if char == '\\' and in_string:
-                    escape_next = True
-                    continue
-                if char == '"' and not escape_next:
-                    in_string = not in_string
-                    continue
-                if not in_string:
-                    if char == "{":
-                        brace_count += 1
-                    elif char == "}":
-                        brace_count -= 1
-                        if brace_count == 0:
-                            end_idx = i + 1
-                            break
-            
-            if end_idx > start_idx:
-                json_str = response[start_idx:end_idx]
-                # Remove trailing code fence if present
-                if json_str.rstrip().endswith("```"):
-                    json_str = json_str.rstrip()[:-3]
-                
-                print(f"  [DEBUG] JSON attempt ({len(json_str)} chars): {json_str[:300]}...")
-                result = json.loads(json_str)
-                print(f"  [DEBUG] Parsed successfully! Keys: {list(result.keys())}")
-
-                if task_type == "table":
-                    tables = result.get("tables", [])
-                    print(f"  [DEBUG] Tables extracted: {tables}")
-                    return {
-                        "reasoning": result.get("reasoning", ""),
-                        "tables": tables,
-                    }
-                else:
-                    columns = result.get("columns", [])
-                    print(f"  [DEBUG] Columns extracted: {columns}")
-                    return {
-                        "reasoning": result.get("reasoning", ""),
-                        "columns": columns,
-                    }
+                print(f"  [DEBUG] No '{{' found in response!")
             else:
-                print(f"  [DEBUG] No matching closing '}}' found!")
-        except (json.JSONDecodeError, Exception) as e:
-            print(f"  [DEBUG] Full response: {response[:500]}...")
-            print(f"  [DEBUG] Error parsing LLM response: {e}")
+                # Find matching closing brace by counting braces, ignoring content in strings
+                brace_count = 0
+                end_idx = -1
+                in_string = False
+                escape_next = False
+                
+                for i, char in enumerate(response[start_idx:], start_idx):
+                    if escape_next:
+                        escape_next = False
+                        continue
+                    if char == '\\' and in_string:
+                        escape_next = True
+                        continue
+                    if char == '"' and not escape_next:
+                        in_string = not in_string
+                        continue
+                    if not in_string:
+                        if char == "{":
+                            brace_count += 1
+                        elif char == "}":
+                            brace_count -= 1
+                            if brace_count == 0:
+                                end_idx = i + 1
+                                break
+                
+                if end_idx > start_idx:
+                    json_str = response[start_idx:end_idx]
+                    # Remove trailing code fence
+                    if json_str.rstrip().endswith("```"):
+                        json_str = json_str.rstrip()[:-3]
+                        
+                    print(f"  [DEBUG] JSON attempt ({len(json_str)} chars): {json_str[:300]}...")
+                    result = json.loads(json_str)
+                    print(f"  [DEBUG] Parsed successfully! Keys: {list(result.keys())}")
 
-        return {"reasoning": "", "tables" if task_type == "table" else "columns": []}
+                    if task_type == "table":
+                        tables = result.get("tables", [])
+                        print(f"  [DEBUG] Tables extracted: {tables}")
+                        return {"reasoning": result.get("reasoning", ""), "tables": tables}
+                    else:
+                        columns = result.get("columns", [])
+                        print(f"  [DEBUG] Columns extracted: {columns}")
+                        return {"reasoning": result.get("reasoning", ""), "columns": columns}
+                else:
+                    print(f"  [DEBUG] No matching closing '}}' found!")
+        except Exception as e:
+            print(f"  [DEBUG] Error parsing JSON: {e}")
+
+        # Fallback: extract table/column names from freeform prose using regex
+        import re
+        if task_type == "table":
+            table_mentions = re.findall(
+                r'\b([A-Za-z_][A-Za-z0-9_]*)\s+table\b|\btable[s]?\s+([A-Za-z_][A-Za-z0-9_]*)\b|'
+                r'\bfrom\s+([A-Za-z_][A-Za-z0-9_]*)\b|\bjoin\s+([A-Za-z_][A-Za-z0-9_]*)\b',
+                response, re.IGNORECASE
+            )
+            seen = set()
+            tables = []
+            for groups in table_mentions:
+                for g in groups:
+                    g = g.strip()
+                    if g and g.lower() not in ('the', 'a', 'an', 'and', 'or', 'in', 'on', 'to', 'table', 'tables'):
+                        if g not in seen:
+                            seen.add(g)
+                            tables.append(g)
+            print(f"  [FALLBACK] Extracted tables from prose: {tables}")
+            return {"reasoning": response[:200], "tables": tables}
+        else:
+            col_mentions = re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b', response)
+            columns = [f"{t}.{c}" for t, c in col_mentions]
+            columns = list(dict.fromkeys(columns))
+            print(f"  [FALLBACK] Extracted columns from prose: {columns}")
+            return {"reasoning": response[:200], "columns": columns}
 
     def union_results(
         self, results: List[Dict[str, Any]], task_type: str
