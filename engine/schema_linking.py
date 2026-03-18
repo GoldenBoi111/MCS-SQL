@@ -210,15 +210,30 @@ class TransformersLLMClient:
             ])
 
         # Batch generation with KV cache enabled - ALL PROMPTS IN ONE FORWARD PASS
-        with torch.inference_mode():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=self.max_new_tokens,
-                temperature=self.temperature if self.temperature > 0 else None,
-                do_sample=self.temperature > 0,
-                pad_token_id=self.tokenizer.eos_token_id,
-                stopping_criteria=stopping_criteria,
-            )
+        try:
+            with torch.inference_mode():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=self.max_new_tokens,
+                    temperature=self.temperature if self.temperature > 0 else None,
+                    do_sample=self.temperature > 0,
+                    pad_token_id=self.tokenizer.eos_token_id,
+                    stopping_criteria=stopping_criteria,
+                )
+        except RuntimeError as e:
+            if "CUDA out of memory" in str(e):
+                # Log OOM error
+                from error_logger import ErrorLogger
+                error_logger = ErrorLogger()
+                error_logger.log_cuda_error(e, {
+                    "phase": "MODEL_GENERATION",
+                    "model_name": self.model_name,
+                    "batch_size": len(prompts),
+                })
+                # Return empty responses
+                return [""] * len(prompts)
+            else:
+                raise
 
         # Decode each generated sequence
         input_lengths = [len(inp) for inp in inputs["input_ids"]]

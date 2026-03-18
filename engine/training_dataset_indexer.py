@@ -56,8 +56,14 @@ class TrainingDatasetIndexer:
             quantizer = faiss.IndexFlatIP(self.dimension)
             self.index = faiss.IndexIVFFlat(quantizer, self.dimension, nlist)
         elif self.index_type == "HNSW":
+            # Use Inner Product (cosine similarity) for normalized embeddings
+            # IndexHNSWFlat uses L2 by default, so we need to use IndexHNSWSQ or add normalization
+            # For normalized embeddings, L2 is equivalent to cosine distance
             M = 32
             self.index = faiss.IndexHNSWFlat(self.dimension, M)
+            # Note: With normalized embeddings (normalize_embeddings=True),
+            # L2 distance ordering is equivalent to cosine distance ordering
+            # Lower L2 distance = Higher cosine similarity = Better match
         else:
             raise ValueError(f"Unknown index type: {self.index_type}")
         print(f"Created {self.index_type} FAISS index")
@@ -261,7 +267,10 @@ class TrainingDatasetIndexer:
             top_k: Number of results to return
 
         Returns:
-            List of (question, SQL, metadata, similarity_score) tuples
+            List of (question, SQL, metadata, distance_score) tuples
+            Results are sorted by distance (lowest first = best matches)
+            
+        Note: For normalized embeddings, lower L2 distance = higher cosine similarity
         """
         if self.index is None or self.embedding_model is None:
             raise ValueError("Index not built.")

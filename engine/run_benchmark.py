@@ -27,6 +27,7 @@ from literal_masker import LiteralMasker
 from schema_linking import SchemaLinker, TransformersLLMClient, MultiModelManager
 from training_dataset_indexer import TrainingDatasetIndexer
 from training_dataset_indexer_masked import MaskedTrainingDatasetIndexer
+from error_logger import ErrorLogger, MemoryManager, check_gpu_memory, clear_gpu_memory
 
 # Multi-GPU setup
 def setup_multi_gpu(num_gpus: int = 4):
@@ -160,12 +161,16 @@ def run_benchmark(
     """
     os.makedirs(output_dir, exist_ok=True)
     
+    # Initialize error logger and memory manager
+    error_logger = ErrorLogger(output_dir)
+    memory_manager = MemoryManager(threshold_gb=5.0, errors_dir=output_dir)
+
     # Set GPU device if specified
     if gpu_id is not None:
         import torch
         torch.cuda.set_device(gpu_id)
         print(f"Running on GPU {gpu_id}")
-    
+
     config = Config()
     
     # Determine number of model copies based on model size and GPU
@@ -270,7 +275,27 @@ def run_benchmark(
         print("  Running Schema Linking...")
         t0 = time.time()
         full_schema = linker.load_schema(db_path)
-        linking_res = linker.link_schema(full_schema, question, evidence)
+        
+        # Check memory before schema linking
+        is_low, free_gb, allocated_gb = check_gpu_memory(threshold_gb=8.0)
+        if is_low:
+            print(f"  [WARNING] GPU memory low before schema linking: {free_gb:.2f}GB free")
+            clear_gpu_memory(verbose=True)
+        
+        try:
+            linking_res = linker.link_schema(full_schema, question, evidence)
+        except RuntimeError as e:
+            if "CUDA out of memory" in str(e):
+                print(f"\n[CUDA OOM] Schema linking failed...")
+                error_logger.log_cuda_error(e, {
+                    "phase": "SCHEMA_LINKING",
+                    "question_id": q_idx,
+                    "db_id": db_id,
+                })
+                # Continue with empty linking result
+                linking_res = type('obj', (object,), {'tables': [], 'columns': []})
+            else:
+                raise
         
         # Format the linked schema for the generator prompt
         linked_schema_dict = {t: full_schema[t] for t in linking_res.tables if t in full_schema}
@@ -356,10 +381,75 @@ def run_benchmark(
                 prompt_metadata.append((p_name, gen_idx))
         
         print(f"  Built {len(all_prompts)} prompts for parallel generation...")
+
+        # Generate all 100 responses in parallel using 2 model copies with batch size 6
+        print("  Running parallel batch generation across 2 models (batch_size=6)...")
         
-        # Generate all 100 responses in parallel using 2 model copies with batch size 8
-        print("  Running parallel batch generation across 2 models (batch_size=8)...")
-        all_responses = multi_model.generate_parallel(all_prompts, stop_sequences=None, batch_size=8)
+        # Check GPU memory before generation
+        is_low, free_gb, allocated_gb = check_gpu_memory(threshold_gb=10.0)
+        if is_low:
+            print(f"  [WARNING] GPU memory low before generation: {free_gb:.2f}GB free")
+            clear_gpu_memory(verbose=True)
+        
+        # Try generation with error handling
+        all_responses = []
+        generation_error = None
+        
+        try:
+            all_responses = multi_model.generate_parallel(all_prompts, stop_sequences=None, batch_size=6)
+        except RuntimeError as e:
+            if "CUDA out of memory" in str(e):
+                generation_error = e
+                print(f"\n[CUDA OOM] Generation failed, attempting recovery...")
+                
+                # Log the error
+                error_logger.log_cuda_error(e, {
+                    "phase": "SQL_GENERATION",
+                    "question_id": q_idx,
+                    "batch_size": 6,
+                    "num_prompts": len(all_prompts),
+                    "free_gb": free_gb,
+                    "allocated_gb": allocated_gb,
+                })
+                
+                # Try with smaller batch size and CPU offloading
+                print("  Retrying with batch_size=2 and CPU offloading...")
+                try:
+                    # Clear memory first
+                    clear_gpu_memory(verbose=True)
+                    
+                    # Offload model weights temporarily (if possible)
+                    import torch
+                    model_on_cpu = {}
+                    for idx, model_wrapper in enumerate(multi_model.models):
+                        if hasattr(model_wrapper, 'model'):
+                            model_on_cpu[idx] = {
+                                'weights': model_wrapper.model.state_dict(),
+                                'device': next(model_wrapper.model.parameters()).device,
+                            }
+                            model_wrapper.model = model_wrapper.model.cpu()
+                    
+                    torch.cuda.empty_cache()
+                    
+                    # Retry with smaller batch
+                    all_responses = multi_model.generate_parallel(all_prompts, stop_sequences=None, batch_size=2)
+                    
+                    # Restore model to GPU
+                    for idx, model_wrapper in enumerate(multi_model.models):
+                        if idx in model_on_cpu and hasattr(model_wrapper, 'model'):
+                            model_wrapper.model.to(model_on_cpu[idx]['device'])
+                    
+                    print("  Recovery successful!")
+                    
+                except Exception as recovery_error:
+                    print(f"  Recovery failed: {recovery_error}")
+                    error_logger.log_cuda_error(recovery_error, {
+                        "phase": "SQL_GENERATION_RECOVERY",
+                        "question_id": q_idx,
+                    })
+                    all_responses = [""] * len(all_prompts)  # Empty responses
+            else:
+                raise  # Re-raise non-OOM errors
         
         # Parse responses and extract SQL
         print("  Parsing responses...")
@@ -591,12 +681,39 @@ def run_benchmark(
             selection_votes = []
 
             print(f"    Generating {n_selection_samples} selection responses in parallel...")
-            
+
             # Create 20 copies of the selection prompt
             selection_prompts = [selection_prompt] * n_selection_samples
+
+            # Generate all 20 responses in parallel with OOM handling
+            selection_responses = []
             
-            # Generate all 20 responses in parallel (batch_size=8)
-            selection_responses = multi_model.generate_parallel(selection_prompts, stop_sequences=None, batch_size=8)
+            try:
+                selection_responses = multi_model.generate_parallel(selection_prompts, stop_sequences=None, batch_size=6)
+            except RuntimeError as e:
+                if "CUDA out of memory" in str(e):
+                    print(f"\n[CUDA OOM] Selection failed, attempting recovery...")
+                    
+                    error_logger.log_cuda_error(e, {
+                        "phase": "SQL_SELECTION",
+                        "question_id": q_idx,
+                        "batch_size": 6,
+                        "num_prompts": len(selection_prompts),
+                    })
+                    
+                    # Retry with smaller batch
+                    try:
+                        clear_gpu_memory(verbose=True)
+                        selection_responses = multi_model.generate_parallel(selection_prompts, stop_sequences=None, batch_size=2)
+                        print("  Selection recovery successful!")
+                    except Exception as recovery_error:
+                        error_logger.log_cuda_error(recovery_error, {
+                            "phase": "SQL_SELECTION_RECOVERY",
+                            "question_id": q_idx,
+                        })
+                        selection_responses = [""] * len(selection_prompts)
+                else:
+                    raise
             
             # Parse all responses
             print(f"    Parsing {len(selection_responses)} selection responses...")
@@ -807,6 +924,19 @@ def run_benchmark(
             allocated = torch.cuda.memory_allocated() / 1e9
             reserved = torch.cuda.memory_reserved() / 1e9
             print(f"  [Memory Cleanup] GPU {gpu_id}: Allocated={allocated:.2f}GB, Reserved={reserved:.2f}GB")
+            
+            # Check if memory is still high and log warning
+            if allocated > 60.0:  # More than 60GB allocated
+                print(f"  [WARNING] High memory usage detected!")
+                error_logger.log_cuda_error(
+                    Exception("High memory usage after cleanup"),
+                    {
+                        "phase": "POST_QUESTION_CLEANUP",
+                        "question_id": q_idx,
+                        "allocated_gb": allocated,
+                        "reserved_gb": reserved,
+                    }
+                )
         # ===========================================================
 
     # Final cleanup of persistent resources

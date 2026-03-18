@@ -431,6 +431,9 @@ class MaskedTrainingDatasetIndexer:
             quantizer = faiss.IndexFlatIP(self.dimension)
             self.index = faiss.IndexIVFFlat(quantizer, self.dimension, nlist)
         elif self.index_type == "HNSW":
+            # Use Inner Product (cosine similarity) for normalized embeddings
+            # IndexHNSWFlat uses L2 by default, but with normalized embeddings:
+            # Lower L2 distance = Higher cosine similarity = Better match
             M = 32
             self.index = faiss.IndexHNSWFlat(self.dimension, M)
         else:
