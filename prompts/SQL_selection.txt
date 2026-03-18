@@ -30,10 +30,13 @@ first SQL. If not, move on to the next SQL.
 choose the first SQL.
 - Provide a detailed step-by-step explanation following the order of the checklist
 when checking whether each SQL satisfies the checklist.
-- Your answer should strictly follow the following json format.
+- Your answer MUST be a valid JSON object with this exact format:
 {{
-    "reasoning": "", // The reasoning steps for choosing the best SQL.
-    "sql": "", // The final chosen SQL.
+    "reasoning": "Step-by-step checklist analysis for each SQL candidate.",
+    "sql": "The final chosen SQL query."
 }}
+
+IMPORTANT: Return ONLY the JSON object. No other text, no explanations outside JSON.
+Start your response with {{ and end with }}.
 
 ### Your Answer:

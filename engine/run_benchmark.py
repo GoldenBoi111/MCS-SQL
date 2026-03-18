@@ -459,11 +459,14 @@ def run_benchmark(
             try:
                 print(f"    Gen {i+1}/100 - Response length: {len(response)}")
                 
-                # Extract SQL from JSON - ignore everything that's not JSON
+                # Extract SQL from JSON - use robust 3-tier parsing
                 sql_query = ""
+                reasoning = ""
 
-                # Strip markdown code fences
+                # Method 1: Try to parse JSON
                 response_stripped = response.strip()
+                
+                # Remove markdown code fences if present
                 if response_stripped.startswith("```json"):
                     response_stripped = response_stripped[7:]
                 elif response_stripped.startswith("```"):
@@ -506,17 +509,35 @@ def run_benchmark(
                         try:
                             parsed = json.loads(json_str)
                             sql_query = parsed.get("sql", "")
-                            print(f"      Parsed SQL: {sql_query[:100] if sql_query else 'None'}...")
+                            reasoning = parsed.get("reasoning", "")
+                            print(f"      Parsed JSON: {sql_query[:100] if sql_query else 'None'}...")
                         except json.JSONDecodeError as je:
-                            print(f"      JSON parse error: {je}")
+                            print(f"      JSON decode error: {je}")
+                            # Method 2: Regex fallback to extract SQL from broken JSON
+                            import re
+                            sql_match = re.search(r'"sql"\s*:\s*"((?:[^"\\]|\\.)*)"', response_stripped, re.DOTALL)
+                            if sql_match:
+                                sql_query = sql_match.group(1)
+                                # Unescape JSON string
+                                sql_query = sql_query.replace('\\"', '"').replace('\\n', '\n').replace('\\\\', '\\')
+                            reasoning_match = re.search(r'"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"', response_stripped, re.DOTALL)
+                            if reasoning_match:
+                                reasoning = reasoning_match.group(1).replace('\\"', '"')
+                            if sql_query:
+                                print(f"      Extracted via regex: {sql_query[:100]}...")
+                    else:
+                        print(f"      No matching braces found")
+                else:
+                    print(f"      No opening brace found")
 
+                # Method 3: Last resort - try to extract SQL directly (without JSON)
                 if not sql_query:
-                    # Method 2: Regex fallback for SQL
                     import re
-                    match = re.search(r'SELECT.*?(?:;|$)', response, re.IGNORECASE | re.DOTALL)
-                    if match:
-                        sql_query = match.group(0).strip()
-                        print(f"      Regex extracted SQL: {sql_query[:100]}...")
+                    # Look for SELECT statement
+                    sql_match = re.search(r'(SELECT\s+.*?)(?:\s*[,}\n]|$)', response, re.IGNORECASE | re.DOTALL)
+                    if sql_match:
+                        sql_query = sql_match.group(1).strip()
+                        print(f"      Extracted SQL directly: {sql_query[:100]}...")
 
                 if sql_query:
                     generated_candidates.append({
@@ -524,8 +545,9 @@ def run_benchmark(
                         "prompt_type": p_name,
                         "gen_idx": gen_idx
                     })
+                    print(f"      SUCCESS: {sql_query[:80]}...")
                 else:
-                    print(f"      No SQL extracted!")
+                    print(f"      FAILED - No SQL extracted from response")
             except Exception as e:
                 print(f"    Parse error: {e}")
                     
@@ -565,13 +587,51 @@ def run_benchmark(
 
         if N_valid == 0:
             print("  No queries executed successfully.")
+            # Still save results with failure explanation
             results_detail.append({
                 "question_id": q.get("question_id", q_idx),
                 "question": question,
-                "winner_sql": "SELECT 1",
-                "correct": False,
-                "confidence": 0.0
+                "db_id": db_id,
+                "difficulty": difficulty,
+                "ground_truth": ground_truth,
+                "winner_sql": None,
+                "is_correct": False,
+                "winner_confidence": 0.0,
+                "execution_times": [],
+                "high_confidence_alternatives": [],
+                "selection": {
+                    "selected_sql": None,
+                    "reasoning": None,
+                    "candidates_count": 0
+                },
+                "metrics": {
+                    "generated": len(generated_candidates),
+                    "execution_errors": execution_errors,
+                    "valid_generations": 0,
+                    "unique_valid_sqls": 0
+                },
+                "failure_reason": "No valid SQL queries were generated or all generated queries failed execution (syntax errors/timeouts). This could be due to: (1) LLM outputting malformed JSON, (2) LLM not following output format, (3) Generated SQL having syntax errors, or (4) Schema linking failed to identify correct tables/columns.",
+                "generated_candidates_sample": [cand["sql"][:200] for cand in generated_candidates[:5]] if generated_candidates else []
             })
+            
+            # Save intermediate results even on failure
+            with open(os.path.join(output_dir, "benchmark_results.json"), "w") as f:
+                json.dump(results_detail, f, indent=2)
+            
+            # Track as incorrect for difficulty stats
+            difficulty_results[difficulty].append(False)
+            
+            # Continue to next question with memory cleanup
+            import gc
+            import torch
+            
+            if 'generated_candidates' in locals(): del generated_candidates
+            if 'all_executions' in locals(): del all_executions
+            if 'sql_to_result_cache' in locals(): del sql_to_result_cache
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
             continue
 
         # Group executions by result_set and track best (minimum) execution time per group
@@ -723,14 +783,23 @@ def run_benchmark(
                     reasoning = None
 
                     # Method 1: Try to parse JSON
-                    start_idx = selection_response.find("{")
+                    response = selection_response.strip()
+                    
+                    # Remove markdown code fences if present
+                    if response.startswith("```json"):
+                        response = response[7:]
+                    elif response.startswith("```"):
+                        response = response[3:]
+                    
+                    # Find the JSON object - extract only the JSON, ignore everything else
+                    start_idx = response.find("{")
                     if start_idx != -1:
                         brace_count = 0
                         end_idx = -1
                         in_string = False
                         escape_next = False
 
-                        for i, char in enumerate(selection_response[start_idx:], start_idx):
+                        for i, char in enumerate(response[start_idx:], start_idx):
                             if escape_next:
                                 escape_next = False
                                 continue
@@ -750,7 +819,7 @@ def run_benchmark(
                                         break
 
                         if end_idx > start_idx:
-                            json_str = selection_response[start_idx:end_idx]
+                            json_str = response[start_idx:end_idx]
                             # Remove trailing code fence if present
                             if json_str.rstrip().endswith("```"):
                                 json_str = json_str.rstrip()[:-3]
@@ -759,16 +828,18 @@ def run_benchmark(
                                 parsed = json.loads(json_str)
                                 sql = parsed.get("sql", "")
                                 reasoning = parsed.get("reasoning", "")
+                                print(f"      Sample {sel_idx+1}: Parsed JSON successfully")
                             except json.JSONDecodeError as je:
+                                print(f"      Sample {sel_idx+1}: JSON decode error: {je}")
                                 # Method 2: Regex fallback to extract SQL from broken JSON
                                 import re
                                 # Try to find "sql": "..." pattern, handling multiline
-                                sql_match = re.search(r'"sql"\s*:\s*"((?:[^"\\]|\\.)*)"', selection_response, re.DOTALL)
+                                sql_match = re.search(r'"sql"\s*:\s*"((?:[^"\\]|\\.)*)"', response, re.DOTALL)
                                 if sql_match:
                                     sql = sql_match.group(1)
                                     # Unescape JSON string
                                     sql = sql.replace('\\"', '"').replace('\\n', '\n').replace('\\\\', '\\')
-                                reasoning_match = re.search(r'"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"', selection_response, re.DOTALL)
+                                reasoning_match = re.search(r'"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"', response, re.DOTALL)
                                 if reasoning_match:
                                     reasoning = reasoning_match.group(1).replace('\\"', '"')
 
@@ -777,13 +848,24 @@ def run_benchmark(
                                 else:
                                     print(f"      Sample {sel_idx+1}: Could not extract SQL")
                         else:
-                            print(f"      Sample {sel_idx+1}: No matching braces")
+                            print(f"      Sample {sel_idx+1}: No matching braces found")
                     else:
-                        print(f"      Sample {sel_idx+1}: No JSON found")
+                        print(f"      Sample {sel_idx+1}: No JSON found (no opening brace)")
+
+                    # Method 3: Last resort - try to extract SQL directly (without JSON)
+                    if not sql:
+                        import re
+                        # Look for SELECT statement
+                        sql_match = re.search(r'(SELECT\s+.*?)(?:\s*[,}\n]|$)', response, re.IGNORECASE | re.DOTALL)
+                        if sql_match:
+                            sql = sql_match.group(1).strip()
+                            print(f"      Sample {sel_idx+1}: Extracted SQL directly (no JSON)")
 
                     if sql:
                         selection_votes.append({"sql": sql, "reasoning": reasoning or ""})
                         print(f"      Sample {sel_idx+1}: {sql[:80]}...")
+                    else:
+                        print(f"      Sample {sel_idx+1}: FAILED - No SQL extracted")
                 except Exception as e:
                     print(f"      Sample {sel_idx+1} error: {e}")
             

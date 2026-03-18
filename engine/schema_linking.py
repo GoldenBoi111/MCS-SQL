@@ -539,13 +539,14 @@ tables that should be referenced to convert the question into SQL.
 
 You need to not only select the required tables, but also explain in detail why each
 table is needed.
-Your answer should strictly follow the following json format.
+Your answer MUST be a valid JSON object with this exact format:
 {{
-    "reasoning": "", // The reason for choosing each table.
-    "tables": [], // List of selected tables.
+    "reasoning": "The reason for choosing each table.",
+    "tables": ["table1", "table2"]
 }}
 
-### Your Answer (JSON ONLY, no other text):"""
+IMPORTANT: Return ONLY the JSON object. No other text, no explanations, no markdown.
+Start your response with {{ and end with }}."""
         return prompt
 
     def build_column_linking_prompt(
