@@ -535,8 +535,9 @@ class SchemaLinker:
         Build prompt for table linking task using external template.
         """
         import os
-        from config import PROMPTS_DIR
-        prompt_path = os.path.join(PROMPTS_DIR, "table_linking.txt")
+        from config import get_config
+        config = get_config()
+        prompt_path = os.path.join(config.PROMPTS_DIR, "table_linking.txt")
         with open(prompt_path, "r", encoding="utf-8") as f:
             template = f.read()
             
@@ -558,8 +559,9 @@ class SchemaLinker:
         Build prompt for column linking task using external template.
         """
         import os
-        from config import PROMPTS_DIR
-        prompt_path = os.path.join(PROMPTS_DIR, "column_linking.txt")
+        from config import get_config
+        config = get_config()
+        prompt_path = os.path.join(config.PROMPTS_DIR, "column_linking.txt")
         with open(prompt_path, "r", encoding="utf-8") as f:
             template = f.read()
             
