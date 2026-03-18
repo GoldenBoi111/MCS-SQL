@@ -4,6 +4,8 @@
 # Mini dev submodule
 mini_dev/
 
+test*
+
 # Python
 __pycache__/
 *.py[cod]

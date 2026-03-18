@@ -177,7 +177,7 @@ def run_benchmark(
     # For 20B model: 1 copy per GPU (uses ~40-45 GB VRAM)
     # For 7B model: 2 copies per GPU (uses ~28 GB VRAM)
     model_name = config.LLM_MODEL_NAME.lower()
-    
+
     # Auto-detect model size from model name
     if "20b" in model_name or "32b" in model_name or "coder" in model_name or "gpt-oss" in model_name:
         num_copies = 1  # Larger model (20B+), 1 copy per GPU
@@ -186,15 +186,15 @@ def run_benchmark(
         num_copies = 1  # Medium model (13-14B), 1 copy per GPU
         print("Detected medium model (13-14B), using 1 copy per GPU")
     else:
-        num_copies = 2  # Smaller model (7B), 2 copies per GPU
-        print("Detected standard model (7B), using 2 copies per GPU")
+        num_copies = 1  # Force 1 copy to avoid OOM (can increase to 2 if VRAM allows)
+        print("Using 1 model copy per GPU (safe mode)")
 
     # Load model copies for parallel batch generation
     print(f"Loading Multi-Model Manager ({num_copies} copies for parallel generation) on GPU {gpu_id if gpu_id is not None else 'all'}...")
     multi_model = MultiModelManager(
         model_name=config.LLM_MODEL_NAME,
         device=config.LLM_DEVICE,
-        max_new_tokens=512,
+        max_new_tokens=config.LLM_MAX_NEW_TOKENS,  # Use config value
         temperature=config.LLM_TEMPERATURE,  # Use config temperature
         num_copies=num_copies,
         gpu_id=gpu_id,  # Pass GPU ID for multi-GPU support
@@ -382,8 +382,8 @@ def run_benchmark(
         
         print(f"  Built {len(all_prompts)} prompts for parallel generation...")
 
-        # Generate all 100 responses in parallel using 2 model copies with batch size 6
-        print("  Running parallel batch generation across 2 models (batch_size=6)...")
+        # Generate all 100 responses in parallel using 2 model copies with batch size 4
+        print("  Running parallel batch generation across 2 models (batch_size=4)...")
         
         # Check GPU memory before generation
         is_low, free_gb, allocated_gb = check_gpu_memory(threshold_gb=10.0)
@@ -396,7 +396,7 @@ def run_benchmark(
         generation_error = None
         
         try:
-            all_responses = multi_model.generate_parallel(all_prompts, stop_sequences=None, batch_size=6)
+            all_responses = multi_model.generate_parallel(all_prompts, stop_sequences=None, batch_size=4)
         except RuntimeError as e:
             if "CUDA out of memory" in str(e):
                 generation_error = e
@@ -689,7 +689,7 @@ def run_benchmark(
             selection_responses = []
             
             try:
-                selection_responses = multi_model.generate_parallel(selection_prompts, stop_sequences=None, batch_size=6)
+                selection_responses = multi_model.generate_parallel(selection_prompts, stop_sequences=None, batch_size=4)
             except RuntimeError as e:
                 if "CUDA out of memory" in str(e):
                     print(f"\n[CUDA OOM] Selection failed, attempting recovery...")
