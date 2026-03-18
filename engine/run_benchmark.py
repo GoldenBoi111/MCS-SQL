@@ -440,7 +440,7 @@ def run_benchmark(
                 print(f"    Parse error: {e}")
                     
         print(f"  Generated {len(generated_candidates)} valid SQL candidates")
-        
+
         # 5. Execute and perform Majority Voting
         # Store all execution results with timing for each generated candidate
         # Structure: list of {sql, result_str, exec_time, success, prompt_type, gen_idx}
@@ -733,10 +733,98 @@ def run_benchmark(
                 "unique_valid_sqls": len(set(item["sql"] for item in all_executions))
             }
         })
-        
+
         # Save intermediate
         with open(os.path.join(output_dir, "benchmark_results.json"), "w") as f:
             json.dump(results_detail, f, indent=2)
+
+        # ========== MEMORY CLEANUP TO PREVENT VRAM LEAKS ==========
+        # Clear GPU memory after each question to prevent OOM
+        import gc
+        import torch
+
+        # Delete large intermediate variables that are no longer needed
+        # Note: Don't delete schema_text, question, evidence - used in selection phase
+        if 'generated_candidates' in locals(): del generated_candidates
+        if 'all_executions' in locals(): del all_executions
+        if 'sql_to_result_cache' in locals(): del sql_to_result_cache
+        if 'std_examples' in locals(): del std_examples
+        if 'msk_examples' in locals(): del msk_examples
+        if 'prompt_variations' in locals(): del prompt_variations
+        if 'linking_res' in locals(): del linking_res
+        if 'full_schema' in locals(): del full_schema
+        if 'sample_contents' in locals(): del sample_contents
+        if 'all_prompts' in locals(): del all_prompts
+        if 'all_responses' in locals(): del all_responses
+        if 'selection_prompts' in locals(): del selection_prompts
+        if 'selection_responses' in locals(): del selection_responses
+        # Now safe to delete these (selection phase is complete)
+        if 'schema_text' in locals(): del schema_text
+        if 'question' in locals(): del question
+        if 'evidence' in locals(): del evidence
+        if 'representative_sql' in locals(): del representative_sql
+        if 'selection_reasoning' in locals(): del selection_reasoning
+        if 'high_conf_sqls' in locals(): del high_conf_sqls
+        if 'high_conf_candidates' in locals(): del high_conf_candidates
+        if 'result_groups' in locals(): del result_groups
+        if 'group_normalizers' in locals(): del group_normalizers
+        if 'execution_confidences' in locals(): del execution_confidences
+        if 'winning_sqls' in locals(): del winning_sqls
+        if 'result_counts' in locals(): del result_counts
+        if 'most_common_result' in locals(): del most_common_result
+        if 'top_count' in locals(): del top_count
+        if 'most_common_sql' in locals(): del most_common_sql
+        if 'vote_count' in locals(): del vote_count
+        if 'selected_sql' in locals(): del selected_sql
+        if 'selected_success' in locals(): del selected_success
+        if 'selected_res_set' in locals(): del selected_res_set
+        if 'majority_success' in locals(): del majority_success
+        if 'majority_res_set' in locals(): del majority_res_set
+        if 'gt_success' in locals(): del gt_success
+        if 'gt_res_set' in locals(): del gt_res_set
+        if 'gt_time' in locals(): del gt_time
+        if 'winner_confidence' in locals(): del winner_confidence
+        if 'processed_results' in locals(): del processed_results
+        if 'candidate_sqls_text' in locals(): del candidate_sqls_text
+        if 'selection_prompt' in locals(): del selection_prompt
+        if 'selection_votes' in locals(): del selection_votes
+        if 'sql_counts' in locals(): del sql_counts
+        if 'selected_reasoning' in locals(): del selected_reasoning
+        if 'is_correct' in locals(): del is_correct
+        if 'execution_times' in locals(): del execution_times
+        if 'ex_text' in locals(): del ex_text
+        if 'base_prompt' in locals(): del base_prompt
+
+        # Force Python garbage collection
+        gc.collect()
+
+        # Clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # Log memory status
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1e9
+            reserved = torch.cuda.memory_reserved() / 1e9
+            print(f"  [Memory Cleanup] GPU {gpu_id}: Allocated={allocated:.2f}GB, Reserved={reserved:.2f}GB")
+        # ===========================================================
+
+    # Final cleanup of persistent resources
+    print("\nPerforming final cleanup of persistent resources...")
+    import gc
+    import torch
+    
+    # Delete primary controllers
+    if 'multi_model' in locals(): del multi_model
+    if 'linker' in locals(): del linker
+    if 'standard_indexer' in locals(): del standard_indexer
+    if 'masked_indexer' in locals(): del masked_indexer
+    if 'literal_masker' in locals(): del literal_masker
+    
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print(f"Final memory status: Allocated={torch.cuda.memory_allocated()/1e9:.2f}GB, Reserved={torch.cuda.memory_reserved()/1e9:.2f}GB")
 
     # Generate detailed report
     generate_detailed_report(results_detail, output_dir)

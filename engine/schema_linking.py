@@ -229,6 +229,15 @@ class TransformersLLMClient:
             response = self.tokenizer.decode(gen_ids, skip_special_tokens=True)
             responses.append(response.strip())
 
+        # Clear GPU memory after batch generation
+        del inputs
+        del outputs
+        del gen_ids
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         return responses
 
 
@@ -335,12 +344,21 @@ class MultiModelManager:
                     for batch_start in range(0, len(indices_prompts), batch_size):
                         batch_end = min(batch_start + batch_size, len(indices_prompts))
                         batch = indices_prompts[batch_start:batch_end]
-                        
+
                         batch_prompts = [p for _, p in batch]
                         batch_results = model.generate_batch(batch_prompts, stop_sequences)
 
                         for (idx, _), result in zip(batch, batch_results):
                             results[idx] = result
+
+                        # Clear memory after each batch to prevent VRAM accumulation
+                        import gc
+                        import torch
+                        del batch_prompts
+                        del batch_results
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
             except Exception as e:
                 errors.append(e)
 
