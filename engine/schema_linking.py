@@ -611,9 +611,15 @@ Your answer should strictly follow the following json format.
         Returns:
             Parsed dictionary with reasoning and tables/columns
         """
+        # PRINT RAW RESPONSE DIRECTLY
+        print(f"\n  ============== RAW LLM OUTPUT ==============")
+        print(response)
+        print(f"  ============== END RAW OUTPUT ==============\n")
+        
         try:
             # Remove markdown code fences if present
             response = response.strip()
+            
             if response.startswith("```json"):
                 response = response[7:]
             elif response.startswith("```"):
@@ -622,6 +628,7 @@ Your answer should strictly follow the following json format.
             # Find the JSON object - extract only the JSON, ignore everything else
             start_idx = response.find("{")
             if start_idx == -1:
+                print(f"  [DEBUG] No '{{' found in response!")
                 return {"reasoning": "", "tables" if task_type == "table" else "columns": []}
             
             # Find matching closing brace by counting braces, ignoring content in strings
@@ -655,22 +662,29 @@ Your answer should strictly follow the following json format.
                 if json_str.rstrip().endswith("```"):
                     json_str = json_str.rstrip()[:-3]
                 
-                print(f"  [DEBUG] JSON attempt ({len(json_str)} chars): {json_str[:200]}...")
+                print(f"  [DEBUG] JSON attempt ({len(json_str)} chars): {json_str[:300]}...")
                 result = json.loads(json_str)
+                print(f"  [DEBUG] Parsed successfully! Keys: {list(result.keys())}")
 
                 if task_type == "table":
+                    tables = result.get("tables", [])
+                    print(f"  [DEBUG] Tables extracted: {tables}")
                     return {
                         "reasoning": result.get("reasoning", ""),
-                        "tables": result.get("tables", []),
+                        "tables": tables,
                     }
                 else:
+                    columns = result.get("columns", [])
+                    print(f"  [DEBUG] Columns extracted: {columns}")
                     return {
                         "reasoning": result.get("reasoning", ""),
-                        "columns": result.get("columns", []),
+                        "columns": columns,
                     }
+            else:
+                print(f"  [DEBUG] No matching closing '}}' found!")
         except (json.JSONDecodeError, Exception) as e:
             print(f"  [DEBUG] Full response: {response[:500]}...")
-            print(f"Error parsing LLM response: {e}")
+            print(f"  [DEBUG] Error parsing LLM response: {e}")
 
         return {"reasoning": "", "tables" if task_type == "table" else "columns": []}
 
