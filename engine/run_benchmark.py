@@ -16,6 +16,7 @@ import gc
 import json
 import logging
 import os
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import random
 import re
 import sqlite3
@@ -444,7 +445,6 @@ def run_benchmark(
                     clear_gpu_memory(verbose=True)
                     
                     # Offload model weights temporarily to free VRAM for batch processing
-                    import torch
                     model_devices = {}
                     for idx, model_wrapper in enumerate(multi_model.models):
                         if hasattr(model_wrapper, 'model'):
@@ -899,8 +899,6 @@ def run_benchmark(
 
         # ========== MEMORY CLEANUP TO PREVENT VRAM LEAKS ==========
         # Clear GPU memory after each question to prevent OOM
-        import gc
-        import torch
 
         # Delete large intermediate variables that are no longer needed
         # Note: Don't delete schema_text, question, evidence - used in selection phase
@@ -1208,8 +1206,6 @@ def gpu_worker(gpu_id, benchmark_path, db_root, output_dir, questions_chunk):
     Must be at module level (not nested) for multiprocessing pickling.
     """
     import os
-    import gc
-    import torch
     
     # Set CUDA visible device BEFORE any torch operations
     os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
@@ -1247,7 +1243,6 @@ def run_multi_gpu_benchmark(
         limit: Optional limit on number of questions
         num_gpus: Number of GPUs to use
     """
-    import torch
     import multiprocessing as mp
     
     # CRITICAL: Use 'spawn' method for CUDA compatibility

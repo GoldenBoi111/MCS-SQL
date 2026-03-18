@@ -69,6 +69,7 @@ class TransformersLLMClient:
 
         model_kwargs = {
             "trust_remote_code": True,
+            "attn_implementation": "flash_attention_2",
         }
 
         # Set dtype based on model and device
