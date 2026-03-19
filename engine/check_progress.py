@@ -11,12 +11,13 @@ import sys
 from pathlib import Path
 
 
-def check_progress(output_dir: str):
+def check_progress(output_dir: str, benchmark_path: str = None):
     """
     Check progress of benchmark runs.
     
     Args:
         output_dir: Directory containing gpu_X subdirectories
+        benchmark_path: Optional path to original benchmark JSON for range analysis
     """
     output_path = Path(output_dir)
     
@@ -36,7 +37,8 @@ def check_progress(output_dir: str):
     print(f"{'='*70}\n")
     
     total_results = 0
-    max_question_ids = {}
+    all_question_ids = []
+    gpu_results_info = {}
     
     for gpu_dir in gpu_dirs:
         results_file = gpu_dir / "benchmark_results.json"
@@ -48,15 +50,29 @@ def check_progress(output_dir: str):
         with open(results_file, "r") as f:
             gpu_results = json.load(f)
         
-        # Find max question_id in this GPU's results
+        # Collect question_ids
+        question_ids = [r.get("question_id") for r in gpu_results if r.get("question_id") is not None]
+        all_question_ids.extend(question_ids)
+        
         if gpu_results:
             max_qid = max(r.get("question_id", 0) for r in gpu_results)
             min_qid = min(r.get("question_id", 0) for r in gpu_results)
-            max_question_ids[gpu_dir.name] = max_qid
-            print(f"  {gpu_dir.name}: {len(gpu_results)} questions (IDs: {min_qid} - {max_qid})")
+            gpu_results_info[gpu_dir.name] = {
+                'count': len(gpu_results),
+                'min_qid': min_qid,
+                'max_qid': max_qid,
+                'question_ids': set(question_ids)
+            }
+            print(f"  {gpu_dir.name}: {len(gpu_results)} questions (question_id: {min_qid} - {max_qid})")
             total_results += len(gpu_results)
         else:
             print(f"  {gpu_dir.name}: 0 questions (empty file)")
+            gpu_results_info[gpu_dir.name] = {
+                'count': 0,
+                'min_qid': None,
+                'max_qid': None,
+                'question_ids': set()
+            }
     
     # Check for merged file
     merged_file = output_path / "benchmark_results_merged.json"
@@ -69,19 +85,57 @@ def check_progress(output_dir: str):
     print(f"  TOTAL: {total_results} questions completed")
     print(f"  {'='*50}")
     
-    # Calculate next start indices for each GPU
+    # If benchmark path provided, analyze original distribution
+    if benchmark_path and os.path.exists(benchmark_path):
+        print(f"\n{'='*70}")
+        print(f"ORIGINAL GPU DISTRIBUTION (from benchmark JSON):")
+        print(f"{'='*70}")
+        
+        with open(benchmark_path, 'r') as f:
+            benchmark = json.load(f)
+        
+        total_questions = len(benchmark)
+        num_gpus = len(gpu_dirs)
+        chunk_size = (total_questions + num_gpus - 1) // num_gpus
+        
+        print(f"\n  Total questions in benchmark: {total_questions}")
+        print(f"  Number of GPUs: {num_gpus}")
+        print(f"  Questions per GPU: ~{chunk_size}")
+        print(f"\n  Original distribution:")
+        
+        for i in range(num_gpus):
+            start_idx = i * chunk_size
+            end_idx = min(start_idx + chunk_size, total_questions)
+            
+            if start_idx < total_questions:
+                # Get question_ids for this GPU's range
+                gpu_qids = set(benchmark[j].get("question_id") for j in range(start_idx, end_idx))
+                
+                # Check how many this GPU completed
+                if f"gpu_{i}" in gpu_results_info:
+                    completed = len(gpu_results_info[f"gpu_{i}"]['question_ids'])
+                    remaining = len(gpu_qids - gpu_results_info[f"gpu_{i}"]['question_ids'])
+                    print(f"    GPU {i}: array indices {start_idx} - {end_idx-1} ({completed} done, {remaining} remaining)")
+                else:
+                    print(f"    GPU {i}: array indices {start_idx} - {end_idx-1} (no results)")
+            else:
+                print(f"    GPU {i}: (no questions assigned)")
+        
+        print(f"\n{'='*70}")
+    
+    # Calculate next array index (not question_id!)
     print(f"\n{'='*70}")
-    print(f"TO RESUME - Use these start indices:")
+    print(f"TO RESUME - Use array index (position in JSON list):")
     print(f"{'='*70}")
     
-    # Assuming questions are distributed evenly, calculate next index per GPU
-    if max_question_ids:
-        # Find the global max question ID completed
-        global_max = max(max_question_ids.values())
-        print(f"\n  Highest question ID completed: {global_max}")
-        print(f"  Next question to process: {global_max + 1}")
-        print(f"\n  To resume from next question:")
-        print(f"    --start {global_max + 1}")
+    if all_question_ids:
+        print(f"\n  ⚠️  NOTE: question_id values are NOT sequential array indices!")
+        print(f"  Your benchmark uses question_id values like: {sorted(all_question_ids)[:5]}...")
+        print(f"\n  To find the next array index:")
+        print(f"    1. Open your benchmark JSON file")
+        print(f"    2. Find which array position contains the next unprocessed question")
+        print(f"    3. Use that position as --start")
+        print(f"\n  Example: If question at position 106 is next, use --start 106")
     
     print(f"\n{'='*70}\n")
 
@@ -126,18 +180,20 @@ def show_question_ids(output_dir: str, gpu_id: int = None, limit: int = 10):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python check_progress.py <output_directory> [gpu_id] [limit]")
+        print("Usage: python check_progress.py <output_directory> [benchmark_path] [gpu_id] [limit]")
         print("\nExamples:")
-        print("  python check_progress.py outputs/benchmark/start_0_end_125")
-        print("  python check_progress.py outputs/benchmark/start_0_end_125 0")
-        print("  python check_progress.py outputs/benchmark/start_0_end_125 0 20")
+        print("  python check_progress.py outputs/benchmark_results")
+        print("  python check_progress.py outputs/benchmark_results /path/to/mini_dev_sqlite.json")
+        print("  python check_progress.py outputs/benchmark_results /path/to/mini_dev_sqlite.json 0")
+        print("  python check_progress.py outputs/benchmark_results /path/to/mini_dev_sqlite.json 0 20")
         sys.exit(1)
     
     output_dir = sys.argv[1]
-    gpu_id = int(sys.argv[2]) if len(sys.argv) > 2 else None
-    limit = int(sys.argv[3]) if len(sys.argv) > 3 else 10
+    benchmark_path = sys.argv[2] if len(sys.argv) > 2 else None
+    gpu_id = int(sys.argv[3]) if len(sys.argv) > 3 else None
+    limit = int(sys.argv[4]) if len(sys.argv) > 4 else 10
     
-    check_progress(output_dir)
+    check_progress(output_dir, benchmark_path)
     
-    if gpu_id is not None or len(sys.argv) > 2:
+    if gpu_id is not None or len(sys.argv) > 3:
         show_question_ids(output_dir, gpu_id, limit)
