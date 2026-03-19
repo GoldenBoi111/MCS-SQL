@@ -104,6 +104,11 @@ class TransformersLLMClient:
         else:
             model_kwargs["device_map"] = "auto"
 
+        # GPT-OSS requires eager attention implementation (doesn't support SDPA)
+        if "gpt-oss" in model_name.lower():
+            model_kwargs["attn_implementation"] = "eager"
+            print("  Using eager attention for GPT-OSS")
+
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
         print(f"Model loaded successfully on {device}")
     def generate(self, prompt: str, stop_sequences: Optional[List[str]] = None) -> str:
