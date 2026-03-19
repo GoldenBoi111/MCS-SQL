@@ -1268,6 +1268,64 @@ def generate_detailed_report(results: List[Dict], output_dir: str):
 # Multi-GPU Worker Function (must be at module level for pickling)
 # =============================================================================
 
+def run_benchmark_single_gpu(
+    benchmark_path: str,
+    db_root: str,
+    output_dir: str,
+    start: int = None,
+    end: int = None,
+    gpu_id: int = None
+):
+    """
+    Run benchmark on a single GPU with start/end index support.
+    
+    Args:
+        benchmark_path: Path to benchmark JSON file
+        db_root: Path to database root directory
+        output_dir: Output directory for results
+        start: Start index (inclusive)
+        end: End index (exclusive)
+        gpu_id: Specific GPU ID to use
+    """
+    # Load all questions
+    questions = load_benchmark(benchmark_path)
+    total_questions = len(questions)
+    
+    # Apply start/end indices
+    if start and start > 0:
+        print(f"Starting from question index {start}...")
+        questions = questions[start:]
+    if end and end > 0:
+        print(f"Limiting to question index {end} (exclusive)...")
+        questions = questions[:end - (start if start else 0)]
+    
+    print(f"Processing {len(questions)} questions (from index {start or 0} to {end or total_questions})")
+    
+    # Build output subdirectory from start/end
+    if start or end:
+        subdir_parts = []
+        if start and start > 0:
+            subdir_parts.append(f"start_{start}")
+        if end and end > 0:
+            subdir_parts.append(f"end_{end}")
+        output_dir = os.path.join(output_dir, "_".join(subdir_parts))
+    
+    # Set GPU ID for output directory
+    gpu_output_dir = os.path.join(output_dir, f"gpu_{gpu_id if gpu_id is not None else 0}")
+    os.makedirs(gpu_output_dir, exist_ok=True)
+    
+    # Run benchmark
+    run_benchmark(
+        benchmark_path=benchmark_path,
+        db_root=db_root,
+        output_dir=gpu_output_dir,
+        limit=None,
+        gpu_id=gpu_id,
+        questions_chunk=questions,
+        start_index=start if start else 0
+    )
+
+
 def gpu_worker(gpu_id, benchmark_path, db_root, output_dir, questions_chunk, start_index=0):
     """
     Worker function to run benchmark on a specific GPU.
@@ -1430,6 +1488,7 @@ if __name__ == "__main__":
     parser.add_argument("--end", type=int, default=None, help="End index (exclusive, for limiting)")
     parser.add_argument("--multi-gpu", action="store_true", help="Use multiple GPUs")
     parser.add_argument("--num-gpus", type=int, default=4, help="Number of GPUs to use")
+    parser.add_argument("--gpu-id", type=int, default=None, help="Specific GPU ID for single-GPU mode")
 
     args = parser.parse_args()
 
@@ -1443,4 +1502,12 @@ if __name__ == "__main__":
             args.num_gpus
         )
     else:
-        run_benchmark(args.benchmark, args.db_root, args.output, args.end)
+        # Single GPU mode with start/end support
+        run_benchmark_single_gpu(
+            args.benchmark,
+            args.db_root,
+            args.output,
+            args.start,
+            args.end,
+            args.gpu_id
+        )
