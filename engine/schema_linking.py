@@ -69,18 +69,33 @@ class TransformersLLMClient:
 
         model_kwargs = {
             "trust_remote_code": True,
+            "low_cpu_mem_usage": True,  # Reduces peak VRAM during load
+            "attn_implementation": "sdpa",  # Native PyTorch memory-efficient attention (Lossless)
         }
+        
+        # Load from singleton config if not provided
+        from config import get_config
+        cfg = get_config()
+        use_4bit = getattr(cfg, "LLM_USE_4BIT", False)
+        use_8bit = getattr(cfg, "LLM_USE_8BIT", False)
 
         # Set dtype based on model and device
         if device == "cuda":
-            # Use bfloat16 for A100 GPUs (better for gpt-oss-20b)
-            # Use float16 for older GPUs or Qwen models
-            if "gpt-oss" in model_name.lower() or "20b" in model_name.lower():
-                model_kwargs["torch_dtype"] = torch.bfloat16
-                print("  Using bfloat16 for GPT-OSS 20B")
+            if use_4bit:
+                model_kwargs["load_in_4bit"] = True
+                print("  Using 4-bit quantization (bitsandbytes)")
+            elif use_8bit:
+                model_kwargs["load_in_8bit"] = True
+                print("  Using 8-bit quantization (bitsandbytes)")
             else:
-                model_kwargs["torch_dtype"] = torch.float16
-                print("  Using float16")
+                # Use bfloat16 for A100 GPUs (better for gpt-oss-20b)
+                # Use float16 for older GPUs or Qwen models
+                if "gpt-oss" in model_name.lower() or "20b" in model_name.lower():
+                    model_kwargs["torch_dtype"] = torch.bfloat16
+                    print("  Using bfloat16 for GPT-OSS 20B")
+                else:
+                    model_kwargs["torch_dtype"] = torch.float16
+                    print("  Using float16")
 
         # Set specific GPU if provided
         if gpu_id is not None:

@@ -152,11 +152,12 @@ def run_benchmark(
     output_dir: str,
     limit: int = None,
     gpu_id: int = None,
-    questions_chunk: List[Dict] = None
+    questions_chunk: List[Dict] = None,
+    start_index: int = 0
 ):
     """
     Run benchmark on a single GPU or all GPUs.
-    
+
     Args:
         benchmark_path: Path to benchmark JSON file
         db_root: Path to database root directory
@@ -164,9 +165,19 @@ def run_benchmark(
         limit: Optional limit on number of questions
         gpu_id: Specific GPU ID to use (None for all)
         questions_chunk: Subset of questions to process (for multi-GPU)
+        start_index: Starting index of this chunk (for appending to existing results)
     """
     os.makedirs(output_dir, exist_ok=True)
     
+    # Load existing results if they exist (for appending)
+    results_file = os.path.join(output_dir, "benchmark_results.json")
+    results_detail = []
+    if os.path.exists(results_file):
+        with open(results_file, "r") as f:
+            results_detail = json.load(f)
+        print(f"Loaded {len(results_detail)} existing results from {results_file}")
+        print("New results will be appended to existing file")
+
     # Initialize error logger and memory manager
     error_logger = ErrorLogger(output_dir)
     memory_manager = MemoryManager(threshold_gb=5.0, errors_dir=output_dir)
@@ -262,7 +273,6 @@ def run_benchmark(
 
     print(f"Loaded {len(questions)} questions")
 
-    results_detail = []
     difficulty_results = {
         "simple": [],
         "moderate": [],
@@ -271,6 +281,9 @@ def run_benchmark(
     }
     
     for q_idx, q in enumerate(questions):
+        # Calculate global question index for proper tracking
+        global_q_idx = start_index + q_idx
+        
         db_id = q["db_id"]
         question = q["question"]
         evidence = q.get("evidence", "")
@@ -278,7 +291,7 @@ def run_benchmark(
         difficulty = q.get("difficulty", "unknown")
         
         db_path = os.path.join(db_root, db_id, f"{db_id}.sqlite")
-        print(f"\n[{q_idx+1}/{len(questions)}] Q: {question[:80]}...")
+        print(f"\n[{global_q_idx+1}] Q: {question[:80]}...")
         
         if not os.path.exists(db_path):
             print(f"  Warning: DB not found at {db_path}")
@@ -1255,13 +1268,13 @@ def generate_detailed_report(results: List[Dict], output_dir: str):
 # Multi-GPU Worker Function (must be at module level for pickling)
 # =============================================================================
 
-def gpu_worker(gpu_id, benchmark_path, db_root, output_dir, questions_chunk):
+def gpu_worker(gpu_id, benchmark_path, db_root, output_dir, questions_chunk, start_index=0):
     """
     Worker function to run benchmark on a specific GPU.
     Must be at module level (not nested) for multiprocessing pickling.
     """
     import os
-    
+
     # Set CUDA visible device BEFORE any torch operations
     os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
 
@@ -1276,7 +1289,8 @@ def gpu_worker(gpu_id, benchmark_path, db_root, output_dir, questions_chunk):
         output_dir=output_dir,
         limit=None,  # Already chunked
         gpu_id=0,  # In worker, we see only 1 GPU (set by CUDA_VISIBLE_DEVICES)
-        questions_chunk=questions_chunk
+        questions_chunk=questions_chunk,
+        start_index=start_index  # Pass start index for result tracking
     )
 
 
@@ -1284,58 +1298,79 @@ def run_multi_gpu_benchmark(
     benchmark_path: str,
     db_root: str,
     output_dir: str,
-    limit: int = None,
+    start: int = None,
+    end: int = None,
     num_gpus: int = 4
 ):
     """
     Run benchmark across multiple GPUs using data parallelism.
     Each GPU processes a different subset of questions independently.
-    
+
     Args:
         benchmark_path: Path to benchmark JSON file
         db_root: Path to database root directory
         output_dir: Output directory for results
-        limit: Optional limit on number of questions
+        start: Optional start index (inclusive, for resuming)
+        end: Optional end index (exclusive, for limiting)
         num_gpus: Number of GPUs to use
     """
     import multiprocessing as mp
-    
+
     # CRITICAL: Use 'spawn' method for CUDA compatibility
     mp.set_start_method('spawn', force=True)
-    
+
     # Setup GPUs
     gpu_ids = setup_multi_gpu(num_gpus)
     num_gpus = len(gpu_ids)
-    
+
     # Load all questions
     questions = load_benchmark(benchmark_path)
-    if limit:
-        questions = questions[:limit]
-    
+
+    # Apply start/end indices for resuming or partial runs
+    if start and start > 0:
+        print(f"Resuming from question index {start}...")
+        questions = questions[start:]
+    if end and end > 0:
+        print(f"Limiting to question index {end} (exclusive)...")
+        questions = questions[:end]
+
+    # Build output subdirectory from start/end to keep runs separate
+    if start or end:
+        subdir_parts = []
+        if start and start > 0:
+            subdir_parts.append(f"start_{start}")
+        if end and end > 0:
+            subdir_parts.append(f"end_{end}")
+        output_dir = os.path.join(output_dir, "_".join(subdir_parts))
+
     print(f"\nTotal questions: {len(questions)}")
     print(f"Distributing across {num_gpus} GPUs...")
-    
+    print(f"Output directory: {output_dir}")
+
     # Split questions evenly across GPUs
     chunk_size = (len(questions) + num_gpus - 1) // num_gpus
     question_chunks = []
+    chunk_start_indices = []
     for i in range(num_gpus):
         start_idx = i * chunk_size
         end_idx = min(start_idx + chunk_size, len(questions))
         if start_idx < len(questions):
             question_chunks.append(questions[start_idx:end_idx])
+            chunk_start_indices.append(start + start_idx if start else start_idx)
         else:
             question_chunks.append([])
-    
+            chunk_start_indices.append(0)
+
     for i, chunk in enumerate(question_chunks):
-        print(f"  GPU {i}: {len(chunk)} questions")
-    
+        print(f"  GPU {i}: {len(chunk)} questions (start index: {chunk_start_indices[i]})")
+
     # Create output directories for each GPU
     gpu_output_dirs = []
     for i in range(num_gpus):
         gpu_output_dir = os.path.join(output_dir, f"gpu_{i}")
         os.makedirs(gpu_output_dir, exist_ok=True)
         gpu_output_dirs.append(gpu_output_dir)
-    
+
     # Run benchmarks in parallel (one process per GPU)
     print(f"\nStarting {num_gpus} parallel benchmark processes...")
 
@@ -1345,7 +1380,7 @@ def run_multi_gpu_benchmark(
         if question_chunks[i]:  # Only start if there are questions
             p = mp.Process(
                 target=gpu_worker,
-                args=(gpu_ids[i], benchmark_path, db_root, gpu_output_dirs[i], question_chunks[i])
+                args=(gpu_ids[i], benchmark_path, db_root, gpu_output_dirs[i], question_chunks[i], chunk_start_indices[i])
             )
             p.start()
             processes.append(p)
@@ -1391,19 +1426,21 @@ if __name__ == "__main__":
     parser.add_argument("--benchmark", required=True, help="Path to mini_dev_sqlite.json")
     parser.add_argument("--db_root", required=True, help="Path to databases dir")
     parser.add_argument("--output", default="outputs/benchmark_results")
-    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--start", type=int, default=None, help="Start index (inclusive, for resuming)")
+    parser.add_argument("--end", type=int, default=None, help="End index (exclusive, for limiting)")
     parser.add_argument("--multi-gpu", action="store_true", help="Use multiple GPUs")
     parser.add_argument("--num-gpus", type=int, default=4, help="Number of GPUs to use")
 
     args = parser.parse_args()
-    
+
     if args.multi_gpu:
         run_multi_gpu_benchmark(
             args.benchmark,
             args.db_root,
             args.output,
-            args.limit,
+            args.start,
+            args.end,
             args.num_gpus
         )
     else:
-        run_benchmark(args.benchmark, args.db_root, args.output, args.limit)
+        run_benchmark(args.benchmark, args.db_root, args.output, args.end)
