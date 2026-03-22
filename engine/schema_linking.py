@@ -324,6 +324,7 @@ class TransformersLLMClient:
         """
         Generate structured JSON output using outlines library.
         Forces the model to output valid JSON matching the provided schema.
+        Uses outlines with device_map="auto" for multi-GPU support.
         
         Args:
             prompt: Input prompt string
@@ -333,41 +334,72 @@ class TransformersLLMClient:
         Returns:
             Generated response as a dictionary
         """
-        if not OUTLINES_AVAILABLE:
-            # Fallback to standard generation if outlines not available
-            print("  Warning: outlines not available, using standard generation")
-            response = self.generate(prompt)
-            # Try to parse as JSON
+        import torch
+        
+        # For 120B: Use outlines with device_map="auto" for automatic multi-GPU distribution
+        if OUTLINES_AVAILABLE:
             try:
-                start_idx = response.find("{")
-                if start_idx != -1:
-                    end_idx = response.rfind("}") + 1
-                    if end_idx > start_idx:
-                        return json.loads(response[start_idx:end_idx])
-            except:
-                pass
-            return {}
+                from outlines.models import Transformers as OutlinesTransformers
+                from outlines import json as outlines_json
+                
+                print(f"  [Outlines] Loading model with device_map='auto' for multi-GPU...")
+                
+                # Load model with outlines using device_map="auto"
+                # This automatically distributes the model across all available GPUs
+                outlines_model = OutlinesTransformers(
+                    model_name=self.model_name,
+                    model_kwargs={
+                        "trust_remote_code": True,
+                        "low_cpu_mem_usage": True,
+                        "device_map": "auto",  # Auto-distribute across GPUs
+                        "torch_dtype": torch.bfloat16,
+                        "attn_implementation": "eager" if "gpt-oss" in self.model_name.lower() else "sdpa",
+                    }
+                )
+                
+                # Create structured generator with JSON schema
+                generator = outlines_json(outlines_model, json_schema)
+                
+                # Apply chat template
+                messages = [
+                    {"role": "system", "content": "You are an expert SQL developer. Output valid JSON only."},
+                    {"role": "user", "content": prompt}
+                ]
+                
+                if self.tokenizer.chat_template is not None:
+                    prompt_text = self.tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True
+                    )
+                else:
+                    prompt_text = prompt
+                
+                # Generate with forced JSON structure (outlines guarantees valid JSON)
+                temp = temperature if temperature is not None else self.temperature
+                print(f"  [Outlines] Generating forced JSON output...")
+                result = generator(prompt_text, temperature=temp, max_tokens=self.max_new_tokens)
+                
+                print(f"  [Outlines] JSON generated successfully")
+                return result
+                
+            except Exception as e:
+                print(f"  [Outlines] Error: {e}")
+                print(f"  [Outlines] Falling back to standard generation + parsing")
+        
+        # Fallback: Standard generation with strong JSON prompting
+        print(f"  [Fallback] Using standard generation with JSON parsing...")
         
         import torch
-        from outlines.models import Transformers as OutlinesTransformers
         
-        # Use outlines model wrapper
-        outlines_model = OutlinesTransformers(
-            model_name=self.model_name,
-            device=self.device,
-            model_kwargs={
-                "trust_remote_code": True,
-                "low_cpu_mem_usage": True,
-                "attn_implementation": "eager" if "gpt-oss" in self.model_name.lower() else "sdpa",
-            }
+        # Apply chat template with strong JSON instructions
+        system_message = (
+            "You are an expert SQL developer. You MUST output ONLY valid JSON. "
+            "No other text, no explanations, no markdown. ONLY JSON."
         )
         
-        # Create structured generator with JSON schema
-        generator = outlines.json(outlines_model, json_schema)
-        
-        # Apply chat template
         messages = [
-            {"role": "system", "content": "You are an expert SQL developer. Output valid JSON only."},
+            {"role": "system", "content": system_message},
             {"role": "user", "content": prompt}
         ]
         
@@ -380,11 +412,84 @@ class TransformersLLMClient:
         else:
             prompt_text = prompt
         
-        # Generate with forced JSON structure
-        temp = temperature if temperature is not None else self.temperature
-        result = generator(prompt_text, temperature=temp, max_tokens=self.max_new_tokens)
+        # Add JSON format instruction to prompt
+        json_instruction = (
+            "\n\nIMPORTANT: Output ONLY valid JSON. No other text. "
+            f"Your response must match this schema: {json.dumps(json_schema)}"
+        )
+        prompt_text = prompt_text + json_instruction
         
-        return result
+        # Tokenize
+        inputs = self.tokenizer(prompt_text, return_tensors="pt")
+        model_device = next(self.model.parameters()).device
+        inputs = {k: v.to(model_device) for k, v in inputs.items()}
+        
+        # Generate
+        temp = temperature if temperature is not None else self.temperature
+        
+        try:
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=self.max_new_tokens,
+                    temperature=temp if temp > 0 else None,
+                    do_sample=temp > 0,
+                    pad_token_id=self.tokenizer.eos_token_id,
+                )
+            
+            # Decode only the generated tokens (not the prompt)
+            input_length = inputs["input_ids"].shape[1]
+            response = self.tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
+            
+        except Exception as e:
+            print(f"  Warning: Generation error: {e}")
+            response = ""
+        
+        # Parse JSON from response
+        try:
+            response = response.strip()
+            # Remove markdown code fences if present
+            if response.startswith("```json"):
+                response = response[7:]
+            elif response.startswith("```"):
+                response = response[3:]
+            if response.endswith("```"):
+                response = response[:-3].strip()
+            
+            # Find JSON object
+            start_idx = response.find("{")
+            if start_idx != -1:
+                brace_count = 0
+                end_idx = -1
+                in_string = False
+                escape_next = False
+                
+                for i, char in enumerate(response[start_idx:], start_idx):
+                    if escape_next:
+                        escape_next = False
+                        continue
+                    if char == '\\' and in_string:
+                        escape_next = True
+                        continue
+                    if char == '"' and not escape_next:
+                        in_string = not in_string
+                        continue
+                    if not in_string:
+                        if char == "{":
+                            brace_count += 1
+                        elif char == "}":
+                            brace_count -= 1
+                            if brace_count == 0:
+                                end_idx = i + 1
+                                break
+                
+                if end_idx > start_idx:
+                    json_str = response[start_idx:end_idx]
+                    return json.loads(json_str)
+        except Exception as e:
+            print(f"  Warning: JSON parse error: {e}")
+        
+        return {}
 
 
 class MultiModelManager:
