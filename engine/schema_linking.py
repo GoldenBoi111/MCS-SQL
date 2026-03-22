@@ -19,8 +19,6 @@ from collections import defaultdict
 
 try:
     import outlines
-    from outlines import models
-    from outlines.models import transformers
 
     OUTLINES_AVAILABLE = True
 except ImportError:
@@ -75,7 +73,6 @@ class TransformersLLMClient:
         from transformers import AutoTokenizer, AutoModelForCausalLM
         import torch
 
-        # Always use standard model loading for true batch generation
         self.model_name = model_name
         self.device = device
         self.max_new_tokens = max_new_tokens
@@ -83,33 +80,30 @@ class TransformersLLMClient:
         self.gpu_id = gpu_id
         self.use_model_parallel = use_model_parallel
         self.gpu_memory_gb = gpu_memory_gb
-        self.outlines_model = None  # Will be initialized on first generate_json call
+        self.outlines_model = None  # Lazy-initialised on first generate_json call
+        self._outlines_failed = False  # Guard: stop retrying after first failure
 
         print(f"Loading model: {model_name}...")
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name, trust_remote_code=True
         )
 
-        # Load model with appropriate dtype
-        # Use expandable_segments to avoid memory fragmentation
         import os
 
         os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
         model_kwargs = {
             "trust_remote_code": True,
-            "low_cpu_mem_usage": True,  # Reduces peak VRAM during load
-            "attn_implementation": "sdpa",  # Native PyTorch memory-efficient attention (Lossless)
+            "low_cpu_mem_usage": True,
+            "attn_implementation": "sdpa",
         }
 
-        # Load from singleton config if not provided
         from config import get_config
 
         cfg = get_config()
         use_4bit = getattr(cfg, "LLM_USE_4BIT", False)
         use_8bit = getattr(cfg, "LLM_USE_8BIT", False)
 
-        # Set dtype based on model and device
         if device == "cuda":
             if use_4bit:
                 model_kwargs["load_in_4bit"] = True
@@ -118,8 +112,6 @@ class TransformersLLMClient:
                 model_kwargs["load_in_8bit"] = True
                 print("  Using 8-bit quantization (bitsandbytes)")
             else:
-                # Use bfloat16 for A100 GPUs (better for gpt-oss-20b and 120B)
-                # Use float16 for older GPUs or Qwen models
                 if (
                     "gpt-oss" in model_name.lower()
                     or "20b" in model_name.lower()
@@ -131,28 +123,23 @@ class TransformersLLMClient:
                     model_kwargs["torch_dtype"] = torch.float16
                     print("  Using float16")
 
-        # FOR 120B: Distribute across all GPUs with CPU offload
         if use_model_parallel or "120b" in model_name.lower():
             n_gpus = torch.cuda.device_count()
             max_memory = {i: f"{gpu_memory_gb}GiB" for i in range(n_gpus)}
             max_memory["cpu"] = "50GiB"
-
             model_kwargs["max_memory"] = max_memory
             model_kwargs["device_map"] = "auto"
-
             print(f"  [120B Mode] Distributing across {n_gpus} GPU(s)")
             print(f"    Per-GPU memory cap: {gpu_memory_gb}GiB")
             print(f"    CPU overflow buffer: 50GiB")
             print(f"    Total available: ~{n_gpus * gpu_memory_gb + 50}GiB")
         else:
-            # Standard single-GPU or data-parallel loading
             if gpu_id is not None:
                 model_kwargs["device_map"] = f"cuda:{gpu_id}"
                 print(f"  Loading on GPU {gpu_id}")
             else:
                 model_kwargs["device_map"] = "auto"
 
-        # GPT-OSS requires eager attention implementation (doesn't support SDPA)
         if "gpt-oss" in model_name.lower():
             model_kwargs["attn_implementation"] = "eager"
             print("  Using eager attention for GPT-OSS")
@@ -163,37 +150,30 @@ class TransformersLLMClient:
     def _get_outlines_model(self):
         """
         Lazy-load outlines wrapper on first use.
+        Uses outlines 1.2.x API: outlines.from_transformers(model, tokenizer).
+        Sets self._outlines_failed = True on any error so we never retry.
         Zero extra VRAM — wraps the already-loaded HF model in place.
-        Uses outlines 1.x API: outlines.models.transformers.Transformers
         """
-        if self.outlines_model is None and OUTLINES_AVAILABLE:
+        if (
+            self.outlines_model is None
+            and OUTLINES_AVAILABLE
+            and not self._outlines_failed
+        ):
             try:
-                from outlines.models.transformers import Transformers
-
                 print("  [Outlines] Wrapping existing model (no extra VRAM)...")
-                self.outlines_model = Transformers(self.model, self.tokenizer)
+                # outlines 1.2.x top-level factory function
+                self.outlines_model = outlines.from_transformers(
+                    self.model, self.tokenizer
+                )
                 print("  [Outlines] Model wrapped successfully")
-            except ImportError as e:
-                # Print what IS available to help debug version mismatches
-                print(f"  [Outlines] ImportError: {e}")
-                try:
-                    import outlines.models.transformers as _om
-
-                    print(
-                        f"  [Outlines] Available names: {[x for x in dir(_om) if not x.startswith('_')]}"
-                    )
-                except Exception:
-                    pass
-                self.outlines_model = None
             except Exception as e:
                 print(f"  [Outlines] Wrap failed: {e}")
-                self.outlines_model = None
+                self._outlines_failed = True
         return self.outlines_model
 
     def generate(self, prompt: str, stop_sequences: Optional[List[str]] = None) -> str:
         """
         Generate response from the model.
-        Uses chat template if available, otherwise uses prompt directly.
 
         Args:
             prompt: Input prompt string
@@ -216,12 +196,10 @@ class TransformersLLMClient:
         else:
             prompt_text = prompt
 
-        # Tokenize
         inputs = self.tokenizer(prompt_text, return_tensors="pt")
         model_device = next(self.model.parameters()).device
         inputs = {k: v.to(model_device) for k, v in inputs.items()}
 
-        # Prepare stop sequences for transformers
         stopping_criteria = None
         if stop_sequences:
             from transformers import StoppingCriteriaList, StoppingCriteria
@@ -277,7 +255,6 @@ class TransformersLLMClient:
         if not prompts:
             return []
 
-        # Apply chat template for gpt-oss-20b if needed
         if "gpt-oss" in self.model_name.lower():
             processed_prompts = []
             for prompt in prompts:
@@ -365,7 +342,7 @@ class TransformersLLMClient:
         self, prompt: str, json_schema, temperature: Optional[float] = None
     ) -> dict:
         """
-        Generate structured JSON output using outlines 1.x.
+        Generate structured JSON output using outlines 1.2.x.
 
         json_schema must be a Pydantic BaseModel class (preferred) or a raw dict.
         outlines guarantees the output matches the schema at the logit level —
@@ -383,13 +360,19 @@ class TransformersLLMClient:
 
         outlines_model = self._get_outlines_model()
 
-        if outlines_model is not None:
+        if outlines_model is not None and not self._outlines_failed:
             try:
-                # outlines 1.x API: outlines.generate.json(model, schema)
-                # NOT "from outlines import json" — that module does not exist.
-                from outlines import generate as gen
-
-                generator = gen.json(outlines_model, json_schema)
+                # outlines 1.2.x API:
+                #   outlines.Generator(model, outlines.json_schema(schema_string))
+                # json_schema() takes a JSON *string*, not a dict or Pydantic class.
+                schema_str = (
+                    json.dumps(json_schema.model_json_schema())
+                    if hasattr(json_schema, "model_json_schema")
+                    else json.dumps(json_schema)
+                )
+                generator = outlines.Generator(
+                    outlines_model, outlines.json_schema(schema_str)
+                )
 
                 messages = [
                     {"role": "system", "content": "You are an expert SQL developer."},
@@ -404,8 +387,6 @@ class TransformersLLMClient:
                 )
 
                 temp = temperature if temperature is not None else self.temperature
-
-                # Pass temperature only when doing sampling; outlines respects this
                 kwargs = {"max_tokens": self.max_new_tokens}
                 if temp > 0:
                     kwargs["temperature"] = temp
@@ -414,19 +395,22 @@ class TransformersLLMClient:
                 result = generator(prompt_text, **kwargs)
                 print("  [Outlines] JSON generated successfully")
 
-                # Pydantic model instance → plain dict; plain dict passes through
+                # 1.2.x returns a JSON string — parse it.
+                # If it already came back as a dict (future-proofing), pass through.
+                if isinstance(result, dict):
+                    return result
                 if hasattr(result, "model_dump"):
                     return result.model_dump()
-                return result if isinstance(result, dict) else {}
+                return json.loads(result)
 
             except Exception as e:
                 print(f"  [Outlines] Generation failed: {e}")
-                print("  [Outlines] Falling back to standard generation + parsing")
+                self._outlines_failed = True
+                print("  [Outlines] Switching to fallback for all remaining calls")
 
         # ── Fallback: standard HF generation with JSON prompting ─────────────
         print("  [Fallback] Standard generation with JSON parsing...")
 
-        # Build a human-readable schema hint for the prompt
         schema_hint = (
             json_schema.model_json_schema()
             if hasattr(json_schema, "model_json_schema")
@@ -617,7 +601,6 @@ class MultiModelManager:
         n_prompts = len(prompts)
         n_models = len(self.models)
 
-        # Distribute prompts across models (round-robin for load balancing)
         model_prompts: List[List[tuple]] = [[] for _ in range(n_models)]
         for i, prompt in enumerate(prompts):
             model_idx = i % n_models
@@ -1169,37 +1152,3 @@ class SchemaLinker:
     "reasoning": "We need specific columns to filter and aggregate the data.",
     "columns": ["customers.customer_id", "customers.currency", "payments.amount"]
 }"""
-
-
-# Example usage
-if __name__ == "__main__":
-    from config import Config
-
-    config = Config()
-
-    llm_client = TransformersLLMClient(
-        model_name=config.LLM_MODEL_NAME,
-        device=config.LLM_DEVICE,
-        max_new_tokens=config.LLM_MAX_NEW_TOKENS,
-        temperature=config.LLM_TEMPERATURE,
-    )
-
-    linker = SchemaLinker(
-        pt=config.TABLE_LINKING_ITERATIONS,
-        pc=config.COLUMN_LINKING_ITERATIONS,
-        n=config.MAJORITY_VOTE_N,
-        llm_client=llm_client,
-    )
-
-    db_path = config.get_database_path()
-    schema = linker.load_schema(db_path)
-
-    question = "What is the average SAT score of schools in Los Angeles county?"
-    evidence = "Average SAT score is calculated by taking the mean of all SAT scores."
-
-    result = linker.link_schema(schema, question, evidence)
-    print(result)
-
-    print("Selected Tables:", result.tables)
-    print("Selected Columns:", result.columns)
-    print("Reasoning:", result.reasoning)
