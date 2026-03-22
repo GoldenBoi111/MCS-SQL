@@ -387,7 +387,7 @@ class TransformersLLMClient:
             try:
                 # outlines 1.x API: outlines.generate.json(model, schema)
                 # NOT "from outlines import json" — that module does not exist.
-                import outlines.generate as gen
+                from outlines import generate as gen
 
                 generator = gen.json(outlines_model, json_schema)
 
