@@ -41,7 +41,7 @@ class SchemaLinkingResult:
 class TransformersLLMClient:
     """
     LLM client using Hugging Face Transformers.
-    Supports both Qwen models and GPT-OSS 20B with true batch generation.
+    Supports both Qwen models and GPT-OSS with model parallelism for 120B.
     """
 
     def __init__(
@@ -51,6 +51,8 @@ class TransformersLLMClient:
         max_new_tokens: int = 512,
         temperature: float = 0.3,
         gpu_id: int = None,
+        use_model_parallel: bool = False,
+        gpu_memory_gb: int = 75,
     ):
         """
         Initialize the LLM client.
@@ -61,6 +63,8 @@ class TransformersLLMClient:
             max_new_tokens: Maximum tokens to generate
             temperature: Sampling temperature (0.3 for focused generation)
             gpu_id: Specific GPU ID to use (None for auto)
+            use_model_parallel: If True, distribute model across all GPUs (for 120B)
+            gpu_memory_gb: Max GPU memory to use per GPU (default 75GB for 120B)
         """
         from transformers import AutoTokenizer, AutoModelForCausalLM
         import torch
@@ -71,6 +75,8 @@ class TransformersLLMClient:
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.gpu_id = gpu_id
+        self.use_model_parallel = use_model_parallel
+        self.gpu_memory_gb = gpu_memory_gb
 
         print(f"Loading model: {model_name}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
@@ -85,7 +91,7 @@ class TransformersLLMClient:
             "low_cpu_mem_usage": True,  # Reduces peak VRAM during load
             "attn_implementation": "sdpa",  # Native PyTorch memory-efficient attention (Lossless)
         }
-        
+
         # Load from singleton config if not provided
         from config import get_config
         cfg = get_config()
@@ -101,21 +107,35 @@ class TransformersLLMClient:
                 model_kwargs["load_in_8bit"] = True
                 print("  Using 8-bit quantization (bitsandbytes)")
             else:
-                # Use bfloat16 for A100 GPUs (better for gpt-oss-20b)
+                # Use bfloat16 for A100 GPUs (better for gpt-oss-20b and 120B)
                 # Use float16 for older GPUs or Qwen models
-                if "gpt-oss" in model_name.lower() or "20b" in model_name.lower():
+                if "gpt-oss" in model_name.lower() or "20b" in model_name.lower() or "120b" in model_name.lower():
                     model_kwargs["torch_dtype"] = torch.bfloat16
-                    print("  Using bfloat16 for GPT-OSS 20B")
+                    print("  Using bfloat16")
                 else:
                     model_kwargs["torch_dtype"] = torch.float16
                     print("  Using float16")
 
-        # Set specific GPU if provided
-        if gpu_id is not None:
-            model_kwargs["device_map"] = f"cuda:{gpu_id}"
-            print(f"  Loading on GPU {gpu_id}")
-        else:
+        # FOR 120B: Distribute across all GPUs with CPU offload
+        if use_model_parallel or "120b" in model_name.lower():
+            n_gpus = torch.cuda.device_count()
+            max_memory = {i: f"{gpu_memory_gb}GiB" for i in range(n_gpus)}
+            max_memory["cpu"] = "50GiB"
+            
+            model_kwargs["max_memory"] = max_memory
             model_kwargs["device_map"] = "auto"
+            
+            print(f"  [120B Mode] Distributing across {n_gpus} GPU(s)")
+            print(f"    Per-GPU memory cap: {gpu_memory_gb}GiB")
+            print(f"    CPU overflow buffer: 50GiB")
+            print(f"    Total available: ~{n_gpus * gpu_memory_gb + 50}GiB")
+        else:
+            # Standard single-GPU or data-parallel loading
+            if gpu_id is not None:
+                model_kwargs["device_map"] = f"cuda:{gpu_id}"
+                print(f"  Loading on GPU {gpu_id}")
+            else:
+                model_kwargs["device_map"] = "auto"
 
         # GPT-OSS requires eager attention implementation (doesn't support SDPA)
         if "gpt-oss" in model_name.lower():
