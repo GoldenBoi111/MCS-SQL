@@ -68,7 +68,6 @@ python -m vllm.entrypoints.api_server \
     --enable-chunked-prefill \
     --dtype "bfloat16" \
     --kv-cache-dtype "auto" \
-    --enforce-eager "False" \
     --trust-remote-code
 
 # Alternative: Run in background
