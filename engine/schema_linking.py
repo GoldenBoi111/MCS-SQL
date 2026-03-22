@@ -21,12 +21,18 @@ try:
     import outlines
     from outlines import models
     from outlines.models import transformers
+
     OUTLINES_AVAILABLE = True
 except ImportError:
     OUTLINES_AVAILABLE = False
     outlines = None
 
-from json_schemas import TABLE_LINKING_SCHEMA, COLUMN_LINKING_SCHEMA, SQL_GENERATION_SCHEMA, SQL_SELECTION_SCHEMA
+from json_schemas import (
+    TABLE_LINKING_SCHEMA,
+    COLUMN_LINKING_SCHEMA,
+    SQL_GENERATION_SCHEMA,
+    SQL_SELECTION_SCHEMA,
+)
 
 
 @dataclass
@@ -80,12 +86,15 @@ class TransformersLLMClient:
         self.outlines_model = None  # Will be initialized on first generate_json call
 
         print(f"Loading model: {model_name}...")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name, trust_remote_code=True
+        )
 
         # Load model with appropriate dtype
         # Use expandable_segments to avoid memory fragmentation
         import os
-        os.environ['PYTORCH_ALLOC_CONF'] = 'expandable_segments:True'
+
+        os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
         model_kwargs = {
             "trust_remote_code": True,
@@ -95,6 +104,7 @@ class TransformersLLMClient:
 
         # Load from singleton config if not provided
         from config import get_config
+
         cfg = get_config()
         use_4bit = getattr(cfg, "LLM_USE_4BIT", False)
         use_8bit = getattr(cfg, "LLM_USE_8BIT", False)
@@ -110,7 +120,11 @@ class TransformersLLMClient:
             else:
                 # Use bfloat16 for A100 GPUs (better for gpt-oss-20b and 120B)
                 # Use float16 for older GPUs or Qwen models
-                if "gpt-oss" in model_name.lower() or "20b" in model_name.lower() or "120b" in model_name.lower():
+                if (
+                    "gpt-oss" in model_name.lower()
+                    or "20b" in model_name.lower()
+                    or "120b" in model_name.lower()
+                ):
                     model_kwargs["torch_dtype"] = torch.bfloat16
                     print("  Using bfloat16")
                 else:
@@ -147,25 +161,39 @@ class TransformersLLMClient:
         print(f"Model loaded successfully on {device}")
 
     def _get_outlines_model(self):
-        """Lazy-load outlines model on first use."""
+        """
+        Lazy-load outlines wrapper on first use.
+        Zero extra VRAM — wraps the already-loaded HF model in place.
+        Uses outlines 1.x API: outlines.models.transformers.Transformers
+        """
         if self.outlines_model is None and OUTLINES_AVAILABLE:
             try:
-                from outlines.models.transformers import TransformersModel
-                import torch
+                from outlines.models.transformers import Transformers
 
-                print(f"  [Outlines] Wrapping existing model for outlines...")
+                print("  [Outlines] Wrapping existing model (no extra VRAM)...")
+                self.outlines_model = Transformers(self.model, self.tokenizer)
+                print("  [Outlines] Model wrapped successfully")
+            except ImportError as e:
+                # Print what IS available to help debug version mismatches
+                print(f"  [Outlines] ImportError: {e}")
+                try:
+                    import outlines.models.transformers as _om
 
-                # Wrap the already-loaded model with Outlines
-                self.outlines_model = TransformersModel(self.model, self.tokenizer)
-                print(f"  [Outlines] Model wrapped successfully")
+                    print(
+                        f"  [Outlines] Available names: {[x for x in dir(_om) if not x.startswith('_')]}"
+                    )
+                except Exception:
+                    pass
+                self.outlines_model = None
             except Exception as e:
-                print(f"  [Outlines] Failed to initialize: {e}")
-                return None
+                print(f"  [Outlines] Wrap failed: {e}")
+                self.outlines_model = None
         return self.outlines_model
+
     def generate(self, prompt: str, stop_sequences: Optional[List[str]] = None) -> str:
         """
         Generate response from the model.
-        Uses chat template for gpt-oss-20b, direct prompt for Qwen.
+        Uses chat template if available, otherwise uses prompt directly.
 
         Args:
             prompt: Input prompt string
@@ -176,25 +204,20 @@ class TransformersLLMClient:
         """
         import torch
 
-        # Standard chat template usage - no forcing as per user request
         messages = [
             {"role": "system", "content": "You are an expert SQL developer."},
-            {"role": "user", "content": prompt}
+            {"role": "user", "content": prompt},
         ]
-        
+
         if self.tokenizer.chat_template is not None:
             prompt_text = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True
+                messages, tokenize=False, add_generation_prompt=True
             )
         else:
             prompt_text = prompt
 
-
         # Tokenize
         inputs = self.tokenizer(prompt_text, return_tensors="pt")
-        # Route inputs to whatever device the model actually lives on
         model_device = next(self.model.parameters()).device
         inputs = {k: v.to(model_device) for k, v in inputs.items()}
 
@@ -209,12 +232,14 @@ class TransformersLLMClient:
                     self.tokenizer = tokenizer
 
                 def __call__(self, input_ids, scores, **kwargs):
-                    decoded = self.tokenizer.decode(input_ids[0], skip_special_tokens=True)
+                    decoded = self.tokenizer.decode(
+                        input_ids[0], skip_special_tokens=True
+                    )
                     return any(seq in decoded for seq in self.sequences)
 
-            stopping_criteria = StoppingCriteriaList([
-                StopOnSequence(stop_sequences, self.tokenizer)
-            ])
+            stopping_criteria = StoppingCriteriaList(
+                [StopOnSequence(stop_sequences, self.tokenizer)]
+            )
 
         with torch.no_grad():
             outputs = self.model.generate(
@@ -226,15 +251,17 @@ class TransformersLLMClient:
                 stopping_criteria=stopping_criteria,
             )
 
-        # Decode only the generated tokens (not the prompt)
         input_length = inputs["input_ids"].shape[1]
-        response = self.tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
+        response = self.tokenizer.decode(
+            outputs[0][input_length:], skip_special_tokens=True
+        )
         return response.strip()
 
-    def generate_batch(self, prompts: List[str], stop_sequences: Optional[List[str]] = None) -> List[str]:
+    def generate_batch(
+        self, prompts: List[str], stop_sequences: Optional[List[str]] = None
+    ) -> List[str]:
         """
         Generate responses for multiple prompts in batch (faster on A100).
-        Uses chat template for gpt-oss-20b, direct prompts for Qwen.
         TRUE BATCH: All prompts processed in single model.forward() call.
 
         Args:
@@ -256,41 +283,38 @@ class TransformersLLMClient:
             for prompt in prompts:
                 messages = [{"role": "user", "content": prompt}]
                 prompt_text = self.tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True
+                    messages, tokenize=False, add_generation_prompt=True
                 )
                 processed_prompts.append(prompt_text)
         else:
             processed_prompts = prompts
 
-        # Tokenize all prompts with padding - TRUE BATCH
         # CRITICAL: padding_side='left' is required for correct batch generation.
         # Without it, padding tokens are added on the right, which corrupts the
         # auto-regressive generation and causes blank/truncated outputs.
         self.tokenizer.padding_side = "left"
         inputs = self.tokenizer(processed_prompts, return_tensors="pt", padding=True)
-        # Route inputs to whatever device the model actually lives on
         model_device = next(self.model.parameters()).device
         inputs = {k: v.to(model_device) for k, v in inputs.items()}
 
-        # Prepare stop sequences
         stopping_criteria = None
         if stop_sequences:
+
             class StopOnSequence(StoppingCriteria):
                 def __init__(self, sequences, tokenizer):
                     self.sequences = sequences
                     self.tokenizer = tokenizer
 
                 def __call__(self, input_ids, scores, **kwargs):
-                    decoded = self.tokenizer.decode(input_ids[0], skip_special_tokens=True)
+                    decoded = self.tokenizer.decode(
+                        input_ids[0], skip_special_tokens=True
+                    )
                     return any(seq in decoded for seq in self.sequences)
 
-            stopping_criteria = StoppingCriteriaList([
-                StopOnSequence(stop_sequences, self.tokenizer)
-            ])
+            stopping_criteria = StoppingCriteriaList(
+                [StopOnSequence(stop_sequences, self.tokenizer)]
+            )
 
-        # Batch generation with KV cache enabled - ALL PROMPTS IN ONE FORWARD PASS
         try:
             with torch.inference_mode():
                 outputs = self.model.generate(
@@ -303,23 +327,22 @@ class TransformersLLMClient:
                 )
         except RuntimeError as e:
             if "CUDA out of memory" in str(e):
-                # Log OOM error
                 from error_logger import ErrorLogger
+
                 error_logger = ErrorLogger()
-                error_logger.log_cuda_error(e, {
-                    "phase": "MODEL_GENERATION",
-                    "model_name": self.model_name,
-                    "batch_size": len(prompts),
-                })
-                # Return empty responses
+                error_logger.log_cuda_error(
+                    e,
+                    {
+                        "phase": "MODEL_GENERATION",
+                        "model_name": self.model_name,
+                        "batch_size": len(prompts),
+                    },
+                )
                 return [""] * len(prompts)
             else:
                 raise
 
-        # Decode each generated sequence
         # CRITICAL: Use the padded tensor shape per-row, not len() on tensor rows.
-        # inputs["input_ids"] is a 2D tensor of shape (batch, seq_len) - each row
-        # has the same padded length, so we read the dimension directly.
         padded_input_len = inputs["input_ids"].shape[1]
         responses = []
         for i in range(len(prompts)):
@@ -327,107 +350,119 @@ class TransformersLLMClient:
             response = self.tokenizer.decode(gen_ids, skip_special_tokens=True)
             responses.append(response.strip())
 
-        # Clear GPU memory after batch generation
         del inputs
         del outputs
         del gen_ids
         import gc
+
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
         return responses
 
-    def generate_json(self, prompt: str, json_schema: dict, temperature: Optional[float] = None) -> dict:
+    def generate_json(
+        self, prompt: str, json_schema, temperature: Optional[float] = None
+    ) -> dict:
         """
-        Generate structured JSON output using outlines library.
-        Forces the model to output valid JSON matching the provided schema.
-        
+        Generate structured JSON output using outlines 1.x.
+
+        json_schema must be a Pydantic BaseModel class (preferred) or a raw dict.
+        outlines guarantees the output matches the schema at the logit level —
+        it is structurally impossible for the model to emit invalid JSON.
+
         Args:
             prompt: Input prompt string
-            json_schema: JSON schema dict defining the expected output structure
+            json_schema: Pydantic BaseModel class or JSON schema dict
             temperature: Optional temperature override
-            
+
         Returns:
-            Generated response as a dictionary
+            Generated response as a plain dict
         """
         import torch
-        
-        # Try to use outlines for forced JSON generation
+
         outlines_model = self._get_outlines_model()
-        
+
         if outlines_model is not None:
             try:
-                from outlines import json as outlines_json
-                
-                # Create structured generator with JSON schema
-                generator = outlines_json(outlines_model, json_schema)
-                
-                # Apply chat template
+                # outlines 1.x API: outlines.generate.json(model, schema)
+                # NOT "from outlines import json" — that module does not exist.
+                import outlines.generate as gen
+
+                generator = gen.json(outlines_model, json_schema)
+
                 messages = [
-                    {"role": "system", "content": "You are an expert SQL developer. Output valid JSON only."},
-                    {"role": "user", "content": prompt}
+                    {"role": "system", "content": "You are an expert SQL developer."},
+                    {"role": "user", "content": prompt},
                 ]
-                
-                if self.tokenizer.chat_template is not None:
-                    prompt_text = self.tokenizer.apply_chat_template(
-                        messages,
-                        tokenize=False,
-                        add_generation_prompt=True
+                prompt_text = (
+                    self.tokenizer.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True
                     )
-                else:
-                    prompt_text = prompt
-                
-                # Generate with forced JSON structure (outlines guarantees valid JSON)
+                    if self.tokenizer.chat_template
+                    else prompt
+                )
+
                 temp = temperature if temperature is not None else self.temperature
-                print(f"  [Outlines] Generating forced JSON output...")
-                result = generator(prompt_text, temperature=temp, max_tokens=self.max_new_tokens)
-                
-                print(f"  [Outlines] JSON generated successfully")
-                return result
-                
+
+                # Pass temperature only when doing sampling; outlines respects this
+                kwargs = {"max_tokens": self.max_new_tokens}
+                if temp > 0:
+                    kwargs["temperature"] = temp
+
+                print("  [Outlines] Generating forced JSON output...")
+                result = generator(prompt_text, **kwargs)
+                print("  [Outlines] JSON generated successfully")
+
+                # Pydantic model instance → plain dict; plain dict passes through
+                if hasattr(result, "model_dump"):
+                    return result.model_dump()
+                return result if isinstance(result, dict) else {}
+
             except Exception as e:
-                print(f"  [Outlines] Error: {e}")
-                print(f"  [Outlines] Falling back to standard generation + parsing")
-        
-        # Fallback: Standard generation with strong JSON prompting
-        print(f"  [Fallback] Using standard generation with JSON parsing...")
-        
-        # Apply chat template with strong JSON instructions
-        system_message = (
-            "You are an expert SQL developer. You MUST output ONLY valid JSON. "
-            "No other text, no explanations, no markdown. ONLY JSON."
+                print(f"  [Outlines] Generation failed: {e}")
+                print("  [Outlines] Falling back to standard generation + parsing")
+
+        # ── Fallback: standard HF generation with JSON prompting ─────────────
+        print("  [Fallback] Standard generation with JSON parsing...")
+
+        # Build a human-readable schema hint for the prompt
+        schema_hint = (
+            json_schema.model_json_schema()
+            if hasattr(json_schema, "model_json_schema")
+            else json_schema
         )
-        
+
         messages = [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": prompt}
+            {
+                "role": "system",
+                "content": (
+                    "You are an expert SQL developer. Output ONLY valid JSON. "
+                    "No markdown, no explanation. ONLY the JSON object."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"{prompt}\n\nIMPORTANT: Output ONLY valid JSON matching this schema: "
+                    f"{json.dumps(schema_hint)}"
+                ),
+            },
         ]
-        
-        if self.tokenizer.chat_template is not None:
-            prompt_text = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True
+
+        prompt_text = (
+            self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
             )
-        else:
-            prompt_text = prompt
-        
-        # Add JSON format instruction to prompt
-        json_instruction = (
-            "\n\nIMPORTANT: Output ONLY valid JSON. No other text. "
-            f"Your response must match this schema: {json.dumps(json_schema)}"
+            if self.tokenizer.chat_template
+            else prompt
         )
-        prompt_text = prompt_text + json_instruction
-        
-        # Tokenize
+
         inputs = self.tokenizer(prompt_text, return_tensors="pt")
         model_device = next(self.model.parameters()).device
         inputs = {k: v.to(model_device) for k, v in inputs.items()}
-        
-        # Generate
+
         temp = temperature if temperature is not None else self.temperature
-        
         try:
             with torch.no_grad():
                 outputs = self.model.generate(
@@ -437,60 +472,58 @@ class TransformersLLMClient:
                     do_sample=temp > 0,
                     pad_token_id=self.tokenizer.eos_token_id,
                 )
-            
-            # Decode only the generated tokens (not the prompt)
             input_length = inputs["input_ids"].shape[1]
-            response = self.tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
-            
+            response = self.tokenizer.decode(
+                outputs[0][input_length:], skip_special_tokens=True
+            ).strip()
         except Exception as e:
-            print(f"  Warning: Generation error: {e}")
-            response = ""
-        
-        # Parse JSON from response
+            print(f"  [Fallback] Generation error: {e}")
+            return {}
+
+        # Strip markdown fences
+        if response.startswith("```json"):
+            response = response[7:]
+        elif response.startswith("```"):
+            response = response[3:]
+        if response.endswith("```"):
+            response = response[:-3].strip()
+
+        # Extract the first complete JSON object by brace-counting
+        start = response.find("{")
+        if start == -1:
+            print("  [Fallback] No '{' found in response")
+            return {}
+
+        depth, in_str, escaped, end = 0, False, False, -1
+        for i, ch in enumerate(response[start:], start):
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\" and in_str:
+                escaped = True
+                continue
+            if ch == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+
+        if end == -1:
+            print("  [Fallback] No matching closing brace found")
+            return {}
+
         try:
-            response = response.strip()
-            # Remove markdown code fences if present
-            if response.startswith("```json"):
-                response = response[7:]
-            elif response.startswith("```"):
-                response = response[3:]
-            if response.endswith("```"):
-                response = response[:-3].strip()
-            
-            # Find JSON object
-            start_idx = response.find("{")
-            if start_idx != -1:
-                brace_count = 0
-                end_idx = -1
-                in_string = False
-                escape_next = False
-                
-                for i, char in enumerate(response[start_idx:], start_idx):
-                    if escape_next:
-                        escape_next = False
-                        continue
-                    if char == '\\' and in_string:
-                        escape_next = True
-                        continue
-                    if char == '"' and not escape_next:
-                        in_string = not in_string
-                        continue
-                    if not in_string:
-                        if char == "{":
-                            brace_count += 1
-                        elif char == "}":
-                            brace_count -= 1
-                            if brace_count == 0:
-                                end_idx = i + 1
-                                break
-                
-                if end_idx > start_idx:
-                    json_str = response[start_idx:end_idx]
-                    return json.loads(json_str)
-        except Exception as e:
-            print(f"  Warning: JSON parse error: {e}")
-        
-        return {}
+            return json.loads(response[start:end])
+        except json.JSONDecodeError as e:
+            print(f"  [Fallback] JSON parse error: {e}")
+            return {}
 
 
 class MultiModelManager:
@@ -498,7 +531,7 @@ class MultiModelManager:
     Manages multiple model copies for parallel batch generation on A100.
     Distributes prompts across model copies for maximum throughput.
     """
-    
+
     def __init__(
         self,
         model_name: str,
@@ -543,16 +576,14 @@ class MultiModelManager:
                 gpu_id=gpu_id,
             )
             self.models.append(model)
-            
-            # Debug: Show memory after each copy
+
             if torch.cuda.is_available():
                 gpu = gpu_id if gpu_id is not None else 0
                 alloc = torch.cuda.memory_allocated(gpu) / 1e9
                 print(f"    After copy {i+1}: GPU memory = {alloc:.2f}GB")
 
-            # Clear cache after each model load to prevent fragmentation
             import gc
-            import torch
+
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -561,8 +592,13 @@ class MultiModelManager:
             print(f"  Estimated VRAM usage on GPU {gpu_id}: ~{num_copies * 40} GB")
         else:
             print(f"  Estimated VRAM usage: ~{num_copies * 40} GB")
-    
-    def generate_parallel(self, prompts: List[str], stop_sequences: Optional[List[str]] = None, batch_size: int = 8) -> List[str]:
+
+    def generate_parallel(
+        self,
+        prompts: List[str],
+        stop_sequences: Optional[List[str]] = None,
+        batch_size: int = 8,
+    ) -> List[str]:
         """
         Generate responses by distributing prompts across all model copies.
         Each model processes prompts in smaller batches to avoid OOM.
@@ -587,8 +623,8 @@ class MultiModelManager:
             model_idx = i % n_models
             model_prompts[model_idx].append((i, prompt))
 
-        # Generate on each model in parallel
         import threading
+
         results: Dict[int, str] = {}
         errors: List[Exception] = []
 
@@ -598,20 +634,21 @@ class MultiModelManager:
                 indices_prompts = model_prompts[model_idx]
 
                 if indices_prompts:
-                    # Process in smaller batches to avoid OOM
                     for batch_start in range(0, len(indices_prompts), batch_size):
                         batch_end = min(batch_start + batch_size, len(indices_prompts))
                         batch = indices_prompts[batch_start:batch_end]
 
                         batch_prompts = [p for _, p in batch]
-                        batch_results = model.generate_batch(batch_prompts, stop_sequences)
+                        batch_results = model.generate_batch(
+                            batch_prompts, stop_sequences
+                        )
 
                         for (idx, _), result in zip(batch, batch_results):
                             results[idx] = result
 
-                        # Clear memory after each batch to prevent VRAM accumulation
                         import gc
                         import torch
+
                         del batch_prompts
                         del batch_results
                         gc.collect()
@@ -620,24 +657,20 @@ class MultiModelManager:
             except Exception as e:
                 errors.append(e)
 
-        # Start all workers
         threads = []
         for i in range(n_models):
             t = threading.Thread(target=worker, args=(i,))
             threads.append(t)
             t.start()
 
-        # Wait for all to complete
         for t in threads:
             t.join()
 
-        # Check for errors
         if errors:
             print(f"Warning: {len(errors)} model errors during parallel generation")
-            for e in errors[:3]:  # Show first 3 errors
+            for e in errors[:3]:
                 print(f"  Error: {e}")
 
-        # Reconstruct results in original order
         responses = [results.get(i, "") for i in range(n_prompts)]
         return responses
 
@@ -687,7 +720,6 @@ class SchemaLinker:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
 
-        # Get all tables
         cursor.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         )
@@ -696,7 +728,6 @@ class SchemaLinker:
         print(tables)
         schema = {}
         for table in tables:
-            # Escape table names with double quotes to handle reserved keywords
             cursor.execute(f'PRAGMA table_info("{table}")')
             columns = [row[1] for row in cursor.fetchall()]
             schema[table] = columns
@@ -711,8 +742,7 @@ class SchemaLinker:
     ) -> str:
         """
         Format schema as text for LLM prompt.
-        Matches the format expected by prompt templates:
-        # table_name ( column1: type, column2: type, ... )
+        Format: # table_name ( col1, col2, col3 )
 
         Args:
             schema: Full database schema
@@ -727,7 +757,6 @@ class SchemaLinker:
         for table in tables:
             if table in schema:
                 columns = schema[table]
-                # Format: # table_name ( col1, col2, col3 )
                 col_str = ", ".join(columns)
                 lines.append(f"# {table} ( {col_str} )")
 
@@ -766,17 +795,17 @@ class SchemaLinker:
         """
         import os
         from config import get_config
+
         config = get_config()
         prompt_path = os.path.join(config.PROMPTS_DIR, "table_linking.txt")
         with open(prompt_path, "r", encoding="utf-8") as f:
             template = f.read()
-            
+
         return template.format(
             schema_text=schema_text,
             question=question,
-            evidence=evidence if evidence else "None provided"
+            evidence=evidence if evidence else "None provided",
         )
-
 
     def build_column_linking_prompt(
         self,
@@ -790,59 +819,57 @@ class SchemaLinker:
         """
         import os
         from config import get_config
+
         config = get_config()
         prompt_path = os.path.join(config.PROMPTS_DIR, "column_linking.txt")
         with open(prompt_path, "r", encoding="utf-8") as f:
             template = f.read()
-            
+
         tables_str = ", ".join(selected_tables)
         return template.format(
             schema_text=schema_text,
             question=question,
             selected_tables=tables_str,
-            evidence=evidence if evidence else "None provided"
+            evidence=evidence if evidence else "None provided",
         )
 
     def parse_llm_response(self, response: str, task_type: str) -> Dict[str, Any]:
         """
         Parse LLM response to extract JSON result.
-        
+        Only used in the mock/fallback path — outlines path returns a dict directly.
+
         Args:
             response: Raw LLM response string
             task_type: Either 'table' or 'column'
-            
+
         Returns:
             Parsed dictionary with reasoning and tables/columns
         """
-        # PRINT RAW RESPONSE DIRECTLY
         print(f"\n  ============== RAW LLM OUTPUT ==============")
         print(response)
         print(f"  ============== END RAW OUTPUT ==============\n")
-        
+
         try:
-            # Remove markdown code fences if present
             response = response.strip()
             if response.startswith("```json"):
                 response = response[7:]
             elif response.startswith("```"):
                 response = response[3:]
-                
-            # Find the JSON object - extract only the JSON, ignore everything else
+
             start_idx = response.find("{")
             if start_idx == -1:
-                print(f"  [DEBUG] No '{{' found in response!")
+                print("  [DEBUG] No '{' found in response!")
             else:
-                # Find matching closing brace by counting braces, ignoring content in strings
                 brace_count = 0
                 end_idx = -1
                 in_string = False
                 escape_next = False
-                
+
                 for i, char in enumerate(response[start_idx:], start_idx):
                     if escape_next:
                         escape_next = False
                         continue
-                    if char == '\\' and in_string:
+                    if char == "\\" and in_string:
                         escape_next = True
                         continue
                     if char == '"' and not escape_next:
@@ -856,51 +883,73 @@ class SchemaLinker:
                             if brace_count == 0:
                                 end_idx = i + 1
                                 break
-                
+
                 if end_idx > start_idx:
                     json_str = response[start_idx:end_idx]
-                    # Remove trailing code fence
                     if json_str.rstrip().endswith("```"):
                         json_str = json_str.rstrip()[:-3]
-                        
-                    print(f"  [DEBUG] JSON attempt ({len(json_str)} chars): {json_str[:300]}...")
+
+                    print(
+                        f"  [DEBUG] JSON attempt ({len(json_str)} chars): {json_str[:300]}..."
+                    )
                     result = json.loads(json_str)
                     print(f"  [DEBUG] Parsed successfully! Keys: {list(result.keys())}")
 
                     if task_type == "table":
                         tables = result.get("tables", [])
                         print(f"  [DEBUG] Tables extracted: {tables}")
-                        return {"reasoning": result.get("reasoning", ""), "tables": tables}
+                        return {
+                            "reasoning": result.get("reasoning", ""),
+                            "tables": tables,
+                        }
                     else:
                         columns = result.get("columns", [])
                         print(f"  [DEBUG] Columns extracted: {columns}")
-                        return {"reasoning": result.get("reasoning", ""), "columns": columns}
+                        return {
+                            "reasoning": result.get("reasoning", ""),
+                            "columns": columns,
+                        }
                 else:
-                    print(f"  [DEBUG] No matching closing '}}' found!")
+                    print("  [DEBUG] No matching closing '}' found!")
         except Exception as e:
             print(f"  [DEBUG] Error parsing JSON: {e}")
 
         # Fallback: extract table/column names from freeform prose using regex
         import re
+
         if task_type == "table":
             table_mentions = re.findall(
-                r'\b([A-Za-z_][A-Za-z0-9_]*)\s+table\b|\btable[s]?\s+([A-Za-z_][A-Za-z0-9_]*)\b|'
-                r'\bfrom\s+([A-Za-z_][A-Za-z0-9_]*)\b|\bjoin\s+([A-Za-z_][A-Za-z0-9_]*)\b',
-                response, re.IGNORECASE
+                r"\b([A-Za-z_][A-Za-z0-9_]*)\s+table\b|\btable[s]?\s+([A-Za-z_][A-Za-z0-9_]*)\b|"
+                r"\bfrom\s+([A-Za-z_][A-Za-z0-9_]*)\b|\bjoin\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+                response,
+                re.IGNORECASE,
             )
             seen = set()
             tables = []
             for groups in table_mentions:
                 for g in groups:
                     g = g.strip()
-                    if g and g.lower() not in ('the', 'a', 'an', 'and', 'or', 'in', 'on', 'to', 'table', 'tables'):
+                    if g and g.lower() not in (
+                        "the",
+                        "a",
+                        "an",
+                        "and",
+                        "or",
+                        "in",
+                        "on",
+                        "to",
+                        "table",
+                        "tables",
+                    ):
                         if g not in seen:
                             seen.add(g)
                             tables.append(g)
             print(f"  [FALLBACK] Extracted tables from prose: {tables}")
             return {"reasoning": response[:200], "tables": tables}
         else:
-            col_mentions = re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b', response)
+            col_mentions = re.findall(
+                r"\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b", response
+            )
             columns = [f"{t}.{c}" for t, c in col_mentions]
             columns = list(dict.fromkeys(columns))
             print(f"  [FALLBACK] Extracted columns from prose: {columns}")
@@ -922,7 +971,6 @@ class SchemaLinker:
         """
         key = "tables" if task_type == "table" else "columns"
 
-        # Collect all unique items (union without duplicates)
         unique_items: List[str] = []
         seen: set = set()
         all_reasoning = []
@@ -930,7 +978,6 @@ class SchemaLinker:
         for result in results:
             items = result.get(key, [])
             reasoning = result.get("reasoning", "")
-            # Only add non-empty, non-duplicate reasoning
             if reasoning and reasoning not in all_reasoning:
                 all_reasoning.append(reasoning)
 
@@ -940,7 +987,6 @@ class SchemaLinker:
                     unique_items.append(item)
 
         combined_reasoning = "\n\n".join(all_reasoning)
-
         return unique_items, combined_reasoning
 
     def link_tables(
@@ -961,35 +1007,30 @@ class SchemaLinker:
         results = []
         self._current_schema = schema
 
-        # Collect all prompts first
         all_prompts = []
-        prompt_configs = []  # Track (shuffle_idx, sample_idx) for each prompt
+        prompt_configs = []
 
         for i in range(self.pt):
-            # Shuffle schema order for diversity
             shuffled_schema = self.shuffle_schema_order(schema)
             schema_text = self.format_schema_for_prompt(shuffled_schema)
-
-            # Build prompt
             prompt = self.build_table_linking_prompt(schema_text, question, evidence)
 
-            # Generate n outputs
             for j in range(self.n):
                 all_prompts.append(prompt)
                 prompt_configs.append((i, j))
 
-        # Check if we have batch generation capability
         print(f"    DEBUG: llm_client type = {type(self.llm_client).__name__}")
-        print(f"    DEBUG: has generate_json = {hasattr(self.llm_client, 'generate_json')}")
+        print(
+            f"    DEBUG: has generate_json = {hasattr(self.llm_client, 'generate_json')}"
+        )
+        print(
+            f"    Table linking: generating {len(all_prompts)} responses with forced JSON..."
+        )
 
-        # Use generate_json for forced JSON output with outlines
-        print(f"    Table linking: generating {len(all_prompts)} responses with forced JSON...")
         for idx, prompt in enumerate(all_prompts):
             if self.llm_client:
-                # Use generate_json with TABLE_LINKING_SCHEMA for forced JSON output
                 result = self.llm_client.generate_json(prompt, TABLE_LINKING_SCHEMA)
                 results.append(result)
-                # Print first 3 responses for debugging
                 if idx < 3:
                     print(f"      Response {idx+1}: tables={result.get('tables', [])}")
             else:
@@ -997,10 +1038,8 @@ class SchemaLinker:
                 parsed = self.parse_llm_response(response, "table")
                 results.append(parsed)
 
-        # Union all results (no duplicates)
         tables, reasoning = self.union_results(results, "table")
         print(f"    Table linking complete: selected {len(tables)} tables: {tables}")
-
         return tables, reasoning
 
     def link_columns(
@@ -1024,45 +1063,39 @@ class SchemaLinker:
             Tuple of (selected columns, reasoning)
         """
         results = []
-
-        # Collect all prompts first
         all_prompts = []
 
         for i in range(self.pc):
-            # Shuffle table order for diversity
             shuffled_schema = self.shuffle_schema_order(schema, selected_tables)
             schema_text = self.format_schema_for_prompt(
                 shuffled_schema, selected_tables
             )
-
-            # Build prompt
             prompt = self.build_column_linking_prompt(
                 schema_text, question, selected_tables, evidence
             )
 
-            # Generate n outputs
             for j in range(self.n):
                 all_prompts.append(prompt)
 
-        # Use generate_json for forced JSON output with outlines
-        print(f"    Column linking: generating {len(all_prompts)} responses with forced JSON...")
+        print(
+            f"    Column linking: generating {len(all_prompts)} responses with forced JSON..."
+        )
+
         for idx, prompt in enumerate(all_prompts):
             if self.llm_client:
-                # Use generate_json with COLUMN_LINKING_SCHEMA for forced JSON output
                 result = self.llm_client.generate_json(prompt, COLUMN_LINKING_SCHEMA)
                 results.append(result)
-                # Print first 3 responses for debugging
                 if idx < 3:
-                    print(f"      Response {idx+1}: columns={len(result.get('columns', []))} columns")
+                    print(
+                        f"      Response {idx+1}: columns={len(result.get('columns', []))} columns"
+                    )
             else:
                 response = self._mock_llm_call(prompt, "column", schema)
                 parsed = self.parse_llm_response(response, "column")
                 results.append(parsed)
 
-        # Union all results (no duplicates)
         columns, reasoning = self.union_results(results, "column")
         print(f"    Column linking complete: selected {len(columns)} columns")
-
         return columns, reasoning
 
     def link_schema(
@@ -1079,16 +1112,10 @@ class SchemaLinker:
         Returns:
             SchemaLinkingResult with tables, columns, and reasoning
         """
-        # Stage 1: Table linking
         tables, table_reasoning = self.link_tables(schema, question, evidence)
-
-        # Stage 2: Column linking (only from selected tables)
         columns, column_reasoning = self.link_columns(
             schema, tables, question, evidence
         )
-
-        # Calculate confidence based on agreement rate
-        total_items = len(tables) + len(columns)
 
         return SchemaLinkingResult(
             tables=tables,
@@ -1113,28 +1140,25 @@ class SchemaLinker:
         """
         if schema:
             tables = list(schema.keys())
-            # Build mock response based on actual schema
             if task_type == "table":
-                # Select first 1-2 tables as mock response
                 selected = tables[: min(2, len(tables))]
                 return f"""{{
     "reasoning": "Based on the question and available tables ({', '.join(tables)}), the selected tables contain relevant data.",
     "tables": {json.dumps(selected)}
 }}"""
             else:
-                # Select columns from the first table
                 if tables:
                     first_table = tables[0]
                     columns = schema.get(first_table, [])
                     selected_columns = [
-                        f"{first_table}.{col}" for col in columns[: min(3, len(columns))]
+                        f"{first_table}.{col}"
+                        for col in columns[: min(3, len(columns))]
                     ]
                     return f"""{{
     "reasoning": "Selected columns from {first_table} table for the query.",
     "columns": {json.dumps(selected_columns)}
 }}"""
 
-        # Fallback for when no schema is provided
         if task_type == "table":
             return """{
     "reasoning": "Based on the question, we need to analyze customer data and payment information.",
@@ -1150,12 +1174,9 @@ class SchemaLinker:
 # Example usage
 if __name__ == "__main__":
     from config import Config
-    
-    # Load configuration
+
     config = Config()
-    
-    # Initialize Qwen LLM client using Transformers
-    # Using Qwen2.5-7B-Instruct (closest publicly available to Qwen 3.5 8B)
+
     llm_client = TransformersLLMClient(
         model_name=config.LLM_MODEL_NAME,
         device=config.LLM_DEVICE,
@@ -1163,7 +1184,6 @@ if __name__ == "__main__":
         temperature=config.LLM_TEMPERATURE,
     )
 
-    # Create schema linker with LLM client
     linker = SchemaLinker(
         pt=config.TABLE_LINKING_ITERATIONS,
         pc=config.COLUMN_LINKING_ITERATIONS,
@@ -1171,15 +1191,12 @@ if __name__ == "__main__":
         llm_client=llm_client,
     )
 
-    # Load schema from database
     db_path = config.get_database_path()
     schema = linker.load_schema(db_path)
 
-    # Use a question relevant to the california_schools database
     question = "What is the average SAT score of schools in Los Angeles county?"
     evidence = "Average SAT score is calculated by taking the mean of all SAT scores."
 
-    # Perform schema linking
     result = linker.link_schema(schema, question, evidence)
     print(result)
 
