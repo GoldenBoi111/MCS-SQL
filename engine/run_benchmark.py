@@ -30,27 +30,11 @@ from typing import List, Dict, Any, Tuple
 
 import torch
 
-try:
-    import outlines
-    from outlines.models import Transformers as OutlinesTransformers
-    OUTLINES_AVAILABLE = True
-except ImportError:
-    OUTLINES_AVAILABLE = False
-    outlines = None
-
-# vLLM support
-try:
-    from vllm_model_manager import vLLMModelManager, vLLMAPIClient, create_vllm_manager
-    VLLM_AVAILABLE = True
-except ImportError:
-    VLLM_AVAILABLE = False
-    vllm_model_manager = None
-
 from json_schemas import SQL_GENERATION_SCHEMA, SQL_SELECTION_SCHEMA
 
 from config import Config
 from literal_masker import LiteralMasker
-from schema_linking import SchemaLinker, TransformersLLMClient, MultiModelManager
+from schema_linking import SchemaLinker, TransformersLLMClient
 from training_dataset_indexer import TrainingDatasetIndexer
 from training_dataset_indexer_masked import MaskedTrainingDatasetIndexer
 from error_logger import ErrorLogger, MemoryManager, check_gpu_memory, clear_gpu_memory
@@ -241,92 +225,68 @@ def run_benchmark(
         print(f"Running on GPU {gpu_id}")
 
     config = Config()
-    
-    # Check if using 120B model - requires model parallelism
+
+    # Load model using TransformersLLMClient with outlines support
+    # The model will use outlines for forced JSON output
     model_name = config.LLM_MODEL_NAME.lower()
     is_120b = "120b" in model_name
-    
+
     if is_120b:
         # FOR 120B: Single model distributed across all GPUs (model parallelism)
-        # This is the approach from your friend's code - uses max_memory distribution
         print(f"\n{'='*70}")
-        print(f"120B Model Detected - Using Model Parallelism")
+        print(f"120B Model Detected - Using Model Parallelism with Outlines")
         print(f"{'='*70}")
         print(f"  Model: {config.LLM_MODEL_NAME}")
-        print(f"  Strategy: Single model distributed across all GPUs")
+        print(f"  Strategy: Single model distributed across all GPUs via outlines")
         print(f"  Per-GPU memory cap: 75GiB")
         print(f"  CPU overflow: 50GiB")
         print(f"{'='*70}\n")
-        
+
         # Load single model with model parallelism
-        print(f"Loading 120B model with model parallelism...")
+        print(f"Loading 120B model with outlines...")
         llm_client = TransformersLLMClient(
             model_name=config.LLM_MODEL_NAME,
             device=config.LLM_DEVICE,
             max_new_tokens=config.LLM_MAX_NEW_TOKENS,
             temperature=config.LLM_TEMPERATURE,
-            use_model_parallel=True,  # Enable model parallelism
-            gpu_memory_gb=75,  # 75GB per GPU
+            use_model_parallel=True,
+            gpu_memory_gb=75,
         )
-        
-        # For 120B, we use the single model directly (no MultiModelManager)
-        # The model is already distributed across all GPUs
-        multi_model = None  # Not used for 120B
-        
-        print(f"✓ 120B model loaded successfully")
-        print(f"  Distributed across {torch.cuda.device_count()} GPUs")
-        
-        # Setup schema linker with the single model
-        linker = SchemaLinker(
-            pt=config.TABLE_LINKING_ITERATIONS,
-            pc=config.COLUMN_LINKING_ITERATIONS,
-            n=config.MAJORITY_VOTE_N,
-            llm_client=llm_client,
-        )
-    else:
-        # Original approach for smaller models (20B, 7B, etc.)
-        # Auto-detect model size from model name
-        if "20b" in model_name or "32b" in model_name or "coder" in model_name or "gpt-oss" in model_name:
-            num_copies = 1  # Larger model (20B+), 1 copy per GPU
-            print("Detected large model (20B+ or gpt-oss-20b), using 1 copy per GPU")
-        elif "14b" in model_name or "13b" in model_name:
-            num_copies = 1  # Medium model (13-14B), 1 copy per GPU
-            print("Detected medium model (13-14B), using 1 copy per GPU")
-        else:
-            num_copies = 2  # Smaller model (7B), 2 copies per GPU
-            print("Detected standard model (7B), using 2 copies per GPU")
 
-        # Load model copies for parallel batch generation
-        print(f"Loading Multi-Model Manager ({num_copies} copies for parallel generation) on GPU {gpu_id if gpu_id is not None else 'all'}...")
-        multi_model = MultiModelManager(
+        print(f"✓ 120B model loaded successfully with outlines")
+        print(f"  Distributed across {torch.cuda.device_count()} GPUs")
+    else:
+        # Standard model loading for all other sizes
+        print(f"\n{'='*70}")
+        print(f"Loading Model with Outlines")
+        print(f"{'='*70}")
+        print(f"  Model: {config.LLM_MODEL_NAME}")
+        print(f"  Strategy: Single model with outlines for structured JSON output")
+        print(f"{'='*70}\n")
+
+        # Load model - outlines will be used for JSON generation
+        print(f"Loading model with outlines support...")
+        llm_client = TransformersLLMClient(
             model_name=config.LLM_MODEL_NAME,
             device=config.LLM_DEVICE,
             max_new_tokens=config.LLM_MAX_NEW_TOKENS,
             temperature=config.LLM_TEMPERATURE,
-            num_copies=num_copies,
-            gpu_id=gpu_id,  # Pass GPU ID for multi-GPU support
+            gpu_id=gpu_id,
         )
-        
-        # Debug: Verify model copies and memory
-        print(f"  ✓ Model copies loaded: {len(multi_model.models)}")
+
+        print(f"✓ Model loaded successfully with outlines")
         if torch.cuda.is_available():
             allocated = torch.cuda.memory_allocated(gpu_id if gpu_id is not None else 0) / 1e9
             reserved = torch.cuda.memory_reserved(gpu_id if gpu_id is not None else 0) / 1e9
-            print(f"  ✓ GPU Memory after load: Allocated={allocated:.2f}GB, Reserved={reserved:.2f}GB")
-            print(f"  ✓ Expected: ~{len(multi_model.models) * 40:.0f}GB for model weights")
+            print(f"  GPU Memory after load: Allocated={allocated:.2f}GB, Reserved={reserved:.2f}GB")
 
-        # Use first model for schema linker (single-threaded)
-        # But pass multi_model for batch generation capability
-        llm_client = multi_model.models[0]
-
-        # Setup schema linker with 20 iterations for majority voting
-        # Pass the multi_model so it can use generate_parallel
-        linker = SchemaLinker(
-            pt=config.TABLE_LINKING_ITERATIONS,
-            pc=config.COLUMN_LINKING_ITERATIONS,
-            n=config.MAJORITY_VOTE_N,
-            llm_client=multi_model,  # Use multi_model for batch generation
-        )
+    # Setup schema linker with the model
+    linker = SchemaLinker(
+        pt=config.TABLE_LINKING_ITERATIONS,
+        pc=config.COLUMN_LINKING_ITERATIONS,
+        n=config.MAJORITY_VOTE_N,
+        llm_client=llm_client,
+    )
 
     # Load Indexes
     print("Loading Standard Index...")
@@ -554,72 +514,36 @@ def run_benchmark(
         # Try generation with error handling
         all_responses = []
 
-        if is_120b:
-            # FOR 120B: Use single model's generate_batch (model is already distributed)
-            print(f"  Running batch generation on 120B model (batch_size=4)...")
-            try:
-                all_responses = llm_client.generate_batch(all_prompts, stop_sequences=None)
-            except RuntimeError as e:
-                if "CUDA out of memory" in str(e):
-                    print(f"\n[CUDA OOM] Generation failed...")
-                    error_logger.log_cuda_error(e, {
-                        "phase": "SQL_GENERATION",
+        # Use llm_client.generate_batch for all models (outlines-based)
+        print(f"  Running batch generation with outlines (batch_size=4)...")
+        try:
+            all_responses = llm_client.generate_batch(all_prompts, stop_sequences=None)
+        except RuntimeError as e:
+            if "CUDA out of memory" in str(e):
+                print(f"\n[CUDA OOM] Generation failed, attempting recovery...")
+
+                # Log the error
+                error_logger.log_cuda_error(e, {
+                    "phase": "SQL_GENERATION",
+                    "question_id": q_idx,
+                })
+
+                # Retry with smaller batch
+                print("  Retrying with batch_size=2...")
+                try:
+                    # Clear memory first
+                    clear_gpu_memory(verbose=True)
+                    all_responses = llm_client.generate_batch(all_prompts, stop_sequences=None)
+                    print("  Recovery successful!")
+                except Exception as recovery_error:
+                    print(f"  Recovery failed: {recovery_error}")
+                    error_logger.log_cuda_error(recovery_error, {
+                        "phase": "SQL_GENERATION_RECOVERY",
                         "question_id": q_idx,
-                        "model": "120B",
                     })
-                    all_responses = [""] * len(all_prompts)
-                else:
-                    raise
-        else:
-            # Original approach for smaller models
-            try:
-                all_responses = multi_model.generate_parallel(all_prompts, stop_sequences=None, batch_size=4)
-            except RuntimeError as e:
-                if "CUDA out of memory" in str(e):
-                    print(f"\n[CUDA OOM] Generation failed, attempting recovery...")
-
-                    # Log the error
-                    error_logger.log_cuda_error(e, {
-                        "phase": "SQL_GENERATION",
-                        "question_id": q_idx,
-                        "batch_size": 4,
-                        "num_prompts": len(all_prompts),
-                    })
-
-                    # Retry with smaller batch size and CPU offloading
-                    print("  Retrying with batch_size=2 and CPU offloading...")
-                    try:
-                        # Clear memory first
-                        clear_gpu_memory(verbose=True)
-
-                        # Offload model weights temporarily to free VRAM for batch processing
-                        model_devices = {}
-                        for idx, model_wrapper in enumerate(multi_model.models):
-                            if hasattr(model_wrapper, 'model'):
-                                model_devices[idx] = next(model_wrapper.model.parameters()).device
-                                model_wrapper.model.cpu()
-
-                        torch.cuda.empty_cache()
-
-                        # Retry with smaller batch
-                        all_responses = multi_model.generate_parallel(all_prompts, stop_sequences=None, batch_size=2)
-
-                        # Restore model to GPU
-                        for idx, model_wrapper in enumerate(multi_model.models):
-                            if idx in model_devices and hasattr(model_wrapper, 'model'):
-                                model_wrapper.model.to(model_devices[idx])
-
-                        print("  Recovery successful!")
-
-                    except Exception as recovery_error:
-                        print(f"  Recovery failed: {recovery_error}")
-                        error_logger.log_cuda_error(recovery_error, {
-                            "phase": "SQL_GENERATION_RECOVERY",
-                            "question_id": q_idx,
-                        })
-                        all_responses = [""] * len(all_prompts)  # Empty responses
-                else:
-                    raise  # Re-raise non-OOM errors
+                    all_responses = [""] * len(all_prompts)  # Empty responses
+            else:
+                raise  # Re-raise non-OOM errors
 
         # IMMEDIATELY clear prompts after generation completes to free space for execution phase
         del all_prompts
@@ -930,52 +854,34 @@ def run_benchmark(
             # Create 20 copies of the selection prompt
             selection_prompts = [selection_prompt] * n_selection_samples
 
-            # Generate all 20 responses
+            # Generate all 20 responses using outlines
             selection_responses = []
 
-            if is_120b:
-                # FOR 120B: Use single model's generate_batch
-                try:
-                    selection_responses = llm_client.generate_batch(selection_prompts, stop_sequences=None)
-                except RuntimeError as e:
-                    if "CUDA out of memory" in str(e):
-                        print(f"\n[CUDA OOM] Selection failed...")
-                        error_logger.log_cuda_error(e, {
-                            "phase": "SQL_SELECTION",
+            # Use llm_client.generate_batch for all models (outlines-based)
+            try:
+                selection_responses = llm_client.generate_batch(selection_prompts, stop_sequences=None)
+            except RuntimeError as e:
+                if "CUDA out of memory" in str(e):
+                    print(f"\n[CUDA OOM] Selection failed, attempting recovery...")
+
+                    error_logger.log_cuda_error(e, {
+                        "phase": "SQL_SELECTION",
+                        "question_id": q_idx,
+                    })
+
+                    # Retry with smaller batch
+                    try:
+                        clear_gpu_memory(verbose=True)
+                        selection_responses = llm_client.generate_batch(selection_prompts, stop_sequences=None)
+                        print("  Selection recovery successful!")
+                    except Exception as recovery_error:
+                        error_logger.log_cuda_error(recovery_error, {
+                            "phase": "SQL_SELECTION_RECOVERY",
                             "question_id": q_idx,
-                            "model": "120B",
                         })
                         selection_responses = [""] * len(selection_prompts)
-                    else:
-                        raise
-            else:
-                # Original approach for smaller models
-                try:
-                    selection_responses = multi_model.generate_parallel(selection_prompts, stop_sequences=None, batch_size=4)
-                except RuntimeError as e:
-                    if "CUDA out of memory" in str(e):
-                        print(f"\n[CUDA OOM] Selection failed, attempting recovery...")
-
-                        error_logger.log_cuda_error(e, {
-                            "phase": "SQL_SELECTION",
-                            "question_id": q_idx,
-                            "batch_size": 4,
-                            "num_prompts": len(selection_prompts),
-                        })
-
-                        # Retry with smaller batch
-                        try:
-                            clear_gpu_memory(verbose=True)
-                            selection_responses = multi_model.generate_parallel(selection_prompts, stop_sequences=None, batch_size=2)
-                            print("  Selection recovery successful!")
-                        except Exception as recovery_error:
-                            error_logger.log_cuda_error(recovery_error, {
-                                "phase": "SQL_SELECTION_RECOVERY",
-                                "question_id": q_idx,
-                            })
-                            selection_responses = [""] * len(selection_prompts)
-                    else:
-                        raise
+                else:
+                    raise
 
             # Cleanup selection prompts immediately after responses are gotten
             del selection_prompts
@@ -1212,11 +1118,13 @@ def run_benchmark(
     print("\nPerforming final cleanup of persistent resources...")
 
     # Delete primary controllers
-    if 'multi_model' in locals(): del multi_model
     if 'linker' in locals(): del linker
     if 'standard_indexer' in locals(): del standard_indexer
     if 'masked_indexer' in locals(): del masked_indexer
     if 'literal_masker' in locals(): del literal_masker
+    if 'llm_client' in locals(): del llm_client
+    if 'error_logger' in locals(): del error_logger
+    if 'memory_manager' in locals(): del memory_manager
 
     gc.collect()
     if torch.cuda.is_available():
