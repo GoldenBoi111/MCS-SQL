@@ -150,16 +150,14 @@ class TransformersLLMClient:
         """Lazy-load outlines model on first use."""
         if self.outlines_model is None and OUTLINES_AVAILABLE:
             try:
-                import outlines
-                from outlines import models as outlines_models
+                from outlines.models.transformers import TransformersModel
                 import torch
 
-                print(f"  [Outlines] Initializing outlines model from existing model...")
+                print(f"  [Outlines] Wrapping existing model for outlines...")
 
-                # Use outlines.models.transformers() function with existing model
-                # API: models.transformers(model_instance, tokenizer)
-                self.outlines_model = outlines_models.transformers(self.model, self.tokenizer)
-                print(f"  [Outlines] Model initialized successfully")
+                # Wrap the already-loaded model with Outlines
+                self.outlines_model = TransformersModel(self.model, self.tokenizer)
+                print(f"  [Outlines] Model wrapped successfully")
             except Exception as e:
                 print(f"  [Outlines] Failed to initialize: {e}")
                 return None
