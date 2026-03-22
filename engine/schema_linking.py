@@ -26,7 +26,7 @@ except ImportError:
     OUTLINES_AVAILABLE = False
     outlines = None
 
-from json_schemas import TABLE_LINKING_SCHEMA, COLUMN_LINKING_SCHEMA
+from json_schemas import TABLE_LINKING_SCHEMA, COLUMN_LINKING_SCHEMA, SQL_GENERATION_SCHEMA, SQL_SELECTION_SCHEMA
 
 
 @dataclass
@@ -40,7 +40,7 @@ class SchemaLinkingResult:
 
 class TransformersLLMClient:
     """
-    LLM client using Hugging Face Transformers.
+    LLM client using Hugging Face Transformers with outlines for forced JSON output.
     Supports both Qwen models and GPT-OSS with model parallelism for 120B.
     """
 
@@ -77,6 +77,7 @@ class TransformersLLMClient:
         self.gpu_id = gpu_id
         self.use_model_parallel = use_model_parallel
         self.gpu_memory_gb = gpu_memory_gb
+        self.outlines_model = None  # Will be initialized on first generate_json call
 
         print(f"Loading model: {model_name}...")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
@@ -121,10 +122,10 @@ class TransformersLLMClient:
             n_gpus = torch.cuda.device_count()
             max_memory = {i: f"{gpu_memory_gb}GiB" for i in range(n_gpus)}
             max_memory["cpu"] = "50GiB"
-            
+
             model_kwargs["max_memory"] = max_memory
             model_kwargs["device_map"] = "auto"
-            
+
             print(f"  [120B Mode] Distributing across {n_gpus} GPU(s)")
             print(f"    Per-GPU memory cap: {gpu_memory_gb}GiB")
             print(f"    CPU overflow buffer: 50GiB")
@@ -144,6 +145,33 @@ class TransformersLLMClient:
 
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
         print(f"Model loaded successfully on {device}")
+
+    def _get_outlines_model(self):
+        """Lazy-load outlines model on first use."""
+        if self.outlines_model is None and OUTLINES_AVAILABLE:
+            try:
+                from outlines.models import Transformers as OutlinesTransformers
+                import torch
+
+                print(f"  [Outlines] Initializing outlines model...")
+
+                model_kwargs = {
+                    "trust_remote_code": True,
+                    "low_cpu_mem_usage": True,
+                    "device_map": "auto",
+                    "torch_dtype": torch.bfloat16 if "gpt-oss" in self.model_name.lower() or "20b" in self.model_name.lower() or "120b" in self.model_name.lower() else torch.float16,
+                    "attn_implementation": "eager" if "gpt-oss" in self.model_name.lower() else "sdpa",
+                }
+
+                self.outlines_model = OutlinesTransformers(
+                    model_name=self.model_name,
+                    model_kwargs=model_kwargs
+                )
+                print(f"  [Outlines] Model initialized successfully")
+            except Exception as e:
+                print(f"  [Outlines] Failed to initialize: {e}")
+                return None
+        return self.outlines_model
     def generate(self, prompt: str, stop_sequences: Optional[List[str]] = None) -> str:
         """
         Generate response from the model.
@@ -324,7 +352,6 @@ class TransformersLLMClient:
         """
         Generate structured JSON output using outlines library.
         Forces the model to output valid JSON matching the provided schema.
-        Uses outlines with device_map="auto" for multi-GPU support.
         
         Args:
             prompt: Input prompt string
@@ -336,26 +363,12 @@ class TransformersLLMClient:
         """
         import torch
         
-        # For 120B: Use outlines with device_map="auto" for automatic multi-GPU distribution
-        if OUTLINES_AVAILABLE:
+        # Try to use outlines for forced JSON generation
+        outlines_model = self._get_outlines_model()
+        
+        if outlines_model is not None:
             try:
-                from outlines.models import Transformers as OutlinesTransformers
                 from outlines import json as outlines_json
-                
-                print(f"  [Outlines] Loading model with device_map='auto' for multi-GPU...")
-                
-                # Load model with outlines using device_map="auto"
-                # This automatically distributes the model across all available GPUs
-                outlines_model = OutlinesTransformers(
-                    model_name=self.model_name,
-                    model_kwargs={
-                        "trust_remote_code": True,
-                        "low_cpu_mem_usage": True,
-                        "device_map": "auto",  # Auto-distribute across GPUs
-                        "torch_dtype": torch.bfloat16,
-                        "attn_implementation": "eager" if "gpt-oss" in self.model_name.lower() else "sdpa",
-                    }
-                )
                 
                 # Create structured generator with JSON schema
                 generator = outlines_json(outlines_model, json_schema)
@@ -389,8 +402,6 @@ class TransformersLLMClient:
         
         # Fallback: Standard generation with strong JSON prompting
         print(f"  [Fallback] Using standard generation with JSON parsing...")
-        
-        import torch
         
         # Apply chat template with strong JSON instructions
         system_message = (
