@@ -150,23 +150,14 @@ class TransformersLLMClient:
         """Lazy-load outlines model on first use."""
         if self.outlines_model is None and OUTLINES_AVAILABLE:
             try:
-                from outlines.models import Transformers as OutlinesTransformers
+                from outlines.models import transformers as outlines_transformers
                 import torch
 
-                print(f"  [Outlines] Initializing outlines model...")
+                print(f"  [Outlines] Initializing outlines model from existing model...")
 
-                model_kwargs = {
-                    "trust_remote_code": True,
-                    "low_cpu_mem_usage": True,
-                    "device_map": "auto",
-                    "torch_dtype": torch.bfloat16 if "gpt-oss" in self.model_name.lower() or "20b" in self.model_name.lower() or "120b" in self.model_name.lower() else torch.float16,
-                    "attn_implementation": "eager" if "gpt-oss" in self.model_name.lower() else "sdpa",
-                }
-
-                self.outlines_model = OutlinesTransformers(
-                    model_name=self.model_name,
-                    model_kwargs=model_kwargs
-                )
+                # Use the already-loaded self.model instead of reloading
+                # Outlines API: transformers(model, tokenizer)
+                self.outlines_model = outlines_transformers(self.model, self.tokenizer)
                 print(f"  [Outlines] Model initialized successfully")
             except Exception as e:
                 print(f"  [Outlines] Failed to initialize: {e}")
