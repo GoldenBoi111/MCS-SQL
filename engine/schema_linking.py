@@ -958,7 +958,7 @@ class SchemaLinker:
     ) -> Tuple[List[str], str]:
         """
         Perform table linking using shuffled prompts and union of all results.
-        Uses batch generation for speed when MultiModelManager is available.
+        Uses outlines for forced JSON output.
 
         Args:
             schema: Database schema dictionary
@@ -974,7 +974,7 @@ class SchemaLinker:
         # Collect all prompts first
         all_prompts = []
         prompt_configs = []  # Track (shuffle_idx, sample_idx) for each prompt
-        
+
         for i in range(self.pt):
             # Shuffle schema order for diversity
             shuffled_schema = self.shuffle_schema_order(schema)
@@ -982,7 +982,7 @@ class SchemaLinker:
 
             # Build prompt
             prompt = self.build_table_linking_prompt(schema_text, question, evidence)
-            
+
             # Generate n outputs
             for j in range(self.n):
                 all_prompts.append(prompt)
@@ -990,29 +990,20 @@ class SchemaLinker:
 
         # Check if we have batch generation capability
         print(f"    DEBUG: llm_client type = {type(self.llm_client).__name__}")
-        print(f"    DEBUG: has generate_parallel = {hasattr(self.llm_client, 'generate_parallel')}")
+        print(f"    DEBUG: has generate_json = {hasattr(self.llm_client, 'generate_json')}")
 
-        if hasattr(self.llm_client, 'generate_parallel'):
-            # Use parallel batch generation (MultiModelManager)
-            print(f"    Table linking: generating {len(all_prompts)} responses in parallel...")
-            all_responses = self.llm_client.generate_parallel(all_prompts, stop_sequences=None, batch_size=4)
-
-            # Parse all responses
-            print(f"    Parsing {len(all_responses)} table linking responses...")
-            for idx, response in enumerate(all_responses):
-                parsed = self.parse_llm_response(response, "table")
-                results.append(parsed)
+        # Use generate_json for forced JSON output with outlines
+        print(f"    Table linking: generating {len(all_prompts)} responses with forced JSON...")
+        for idx, prompt in enumerate(all_prompts):
+            if self.llm_client:
+                # Use generate_json with TABLE_LINKING_SCHEMA for forced JSON output
+                result = self.llm_client.generate_json(prompt, TABLE_LINKING_SCHEMA)
+                results.append(result)
                 # Print first 3 responses for debugging
                 if idx < 3:
-                    print(f"      Response {idx+1}: tables={parsed.get('tables', [])}")
-        else:
-            # Sequential generation (fallback)
-            print(f"    Table linking: generating {len(all_prompts)} responses sequentially...")
-            for idx, prompt in enumerate(all_prompts):
-                if self.llm_client:
-                    response = self.llm_client.generate(prompt)
-                else:
-                    response = self._mock_llm_call(prompt, "table", schema)
+                    print(f"      Response {idx+1}: tables={result.get('tables', [])}")
+            else:
+                response = self._mock_llm_call(prompt, "table", schema)
                 parsed = self.parse_llm_response(response, "table")
                 results.append(parsed)
 
@@ -1031,7 +1022,7 @@ class SchemaLinker:
     ) -> Tuple[List[str], str]:
         """
         Perform column linking using shuffled prompts and union of all results.
-        Uses batch generation for speed when MultiModelManager is available.
+        Uses outlines for forced JSON output.
 
         Args:
             schema: Database schema dictionary
@@ -1046,7 +1037,7 @@ class SchemaLinker:
 
         # Collect all prompts first
         all_prompts = []
-        
+
         for i in range(self.pc):
             # Shuffle table order for diversity
             shuffled_schema = self.shuffle_schema_order(schema, selected_tables)
@@ -1058,33 +1049,23 @@ class SchemaLinker:
             prompt = self.build_column_linking_prompt(
                 schema_text, question, selected_tables, evidence
             )
-            
+
             # Generate n outputs
             for j in range(self.n):
                 all_prompts.append(prompt)
 
-        # Check if we have batch generation capability
-        if hasattr(self.llm_client, 'generate_parallel'):
-            # Use parallel batch generation (MultiModelManager)
-            print(f"    Column linking: generating {len(all_prompts)} responses in parallel...")
-            all_responses = self.llm_client.generate_parallel(all_prompts, stop_sequences=None, batch_size=4)
-            
-            # Parse all responses
-            print(f"    Parsing {len(all_responses)} column linking responses...")
-            for idx, response in enumerate(all_responses):
-                parsed = self.parse_llm_response(response, "column")
-                results.append(parsed)
+        # Use generate_json for forced JSON output with outlines
+        print(f"    Column linking: generating {len(all_prompts)} responses with forced JSON...")
+        for idx, prompt in enumerate(all_prompts):
+            if self.llm_client:
+                # Use generate_json with COLUMN_LINKING_SCHEMA for forced JSON output
+                result = self.llm_client.generate_json(prompt, COLUMN_LINKING_SCHEMA)
+                results.append(result)
                 # Print first 3 responses for debugging
                 if idx < 3:
-                    print(f"      Response {idx+1}: columns={len(parsed.get('columns', []))} columns")
-        else:
-            # Sequential generation (fallback)
-            print(f"    Column linking: generating {len(all_prompts)} responses sequentially...")
-            for prompt in all_prompts:
-                if self.llm_client:
-                    response = self.llm_client.generate(prompt)
-                else:
-                    response = self._mock_llm_call(prompt, "column", schema)
+                    print(f"      Response {idx+1}: columns={len(result.get('columns', []))} columns")
+            else:
+                response = self._mock_llm_call(prompt, "column", schema)
                 parsed = self.parse_llm_response(response, "column")
                 results.append(parsed)
 
