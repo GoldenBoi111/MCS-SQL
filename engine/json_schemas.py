@@ -15,18 +15,17 @@ TABLE_LINKING_SCHEMA: Dict[str, Any] = {
     "properties": {
         "reasoning": {
             "type": "string",
-            "description": "The reason for choosing each table"
+            "description": "The reason for choosing each table",
         },
         "tables": {
             "type": "array",
-            "items": {
-                "type": "string"
-            },
-            "description": "List of selected tables"
-        }
+            "items": {"type": "string"},
+            "minItems": 1,
+            "description": "List of selected tables",
+        },
     },
     "required": ["reasoning", "tables"],
-    "additionalProperties": False
+    "additionalProperties": False,
 }
 
 
@@ -37,18 +36,17 @@ COLUMN_LINKING_SCHEMA: Dict[str, Any] = {
     "properties": {
         "reasoning": {
             "type": "string",
-            "description": "The reason for choosing each column"
+            "description": "The reason for choosing each column",
         },
         "columns": {
             "type": "array",
-            "items": {
-                "type": "string"
-            },
-            "description": "List of selected columns in format table_name.column_name"
-        }
+            "items": {"type": "string"},
+            "minItems": 1,
+            "description": "List of selected columns in format table_name.column_name",
+        },
     },
     "required": ["reasoning", "columns"],
-    "additionalProperties": False
+    "additionalProperties": False,
 }
 
 
@@ -59,15 +57,12 @@ SQL_GENERATION_SCHEMA: Dict[str, Any] = {
     "properties": {
         "reasoning": {
             "type": "string",
-            "description": "The reasoning steps for generating SQL"
+            "description": "The reasoning steps for generating SQL",
         },
-        "sql": {
-            "type": "string",
-            "description": "The final generated SQL query"
-        }
+        "sql": {"type": "string", "description": "The final generated SQL query"},
     },
     "required": ["reasoning", "sql"],
-    "additionalProperties": False
+    "additionalProperties": False,
 }
 
 
@@ -78,15 +73,12 @@ SQL_SELECTION_SCHEMA: Dict[str, Any] = {
     "properties": {
         "reasoning": {
             "type": "string",
-            "description": "The reasoning steps for choosing the best SQL"
+            "description": "The reasoning steps for choosing the best SQL",
         },
-        "sql": {
-            "type": "string",
-            "description": "The final chosen SQL query"
-        }
+        "sql": {"type": "string", "description": "The final chosen SQL query"},
     },
     "required": ["reasoning", "sql"],
-    "additionalProperties": False
+    "additionalProperties": False,
 }
 
 
@@ -97,11 +89,11 @@ QUESTION_MASKING_SCHEMA: Dict[str, Any] = {
     "properties": {
         "masked_question": {
             "type": "string",
-            "description": "The question with table names, column names, and values replaced by placeholders"
+            "description": "The question with table names, column names, and values replaced by placeholders",
         }
     },
     "required": ["masked_question"],
-    "additionalProperties": False
+    "additionalProperties": False,
 }
 
 
@@ -112,22 +104,22 @@ SQL_MASKING_SCHEMA: Dict[str, Any] = {
     "properties": {
         "masked_text": {
             "type": "string",
-            "description": "The SQL query with literals replaced by placeholders"
+            "description": "The SQL query with literals replaced by placeholders",
         }
     },
     "required": ["masked_text"],
-    "additionalProperties": False
+    "additionalProperties": False,
 }
 
 
 def get_schema_for_task(task_name: str) -> Dict[str, Any]:
     """
     Get JSON schema for a specific task.
-    
+
     Args:
-        task_name: Name of the task (e.g., 'table_linking', 'column_linking', 
+        task_name: Name of the task (e.g., 'table_linking', 'column_linking',
                    'sql_generation', 'sql_selection', 'question_masking', 'sql_masking')
-    
+
     Returns:
         JSON schema dictionary for the task
     """
@@ -139,8 +131,10 @@ def get_schema_for_task(task_name: str) -> Dict[str, Any]:
         "question_masking": QUESTION_MASKING_SCHEMA,
         "sql_masking": SQL_MASKING_SCHEMA,
     }
-    
+
     if task_name not in schemas:
-        raise ValueError(f"Unknown task: {task_name}. Available tasks: {list(schemas.keys())}")
-    
+        raise ValueError(
+            f"Unknown task: {task_name}. Available tasks: {list(schemas.keys())}"
+        )
+
     return schemas[task_name]
