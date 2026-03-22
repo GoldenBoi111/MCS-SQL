@@ -1,6 +1,4 @@
-### When a DB schema, a question, and a knowledge evidence are given, and up to
-three SQLite queries expressing the question are given, please choose the most
-accurate SQL based on the Checklist.
+### When a DB schema, a question, and a knowledge evidence are given, and up to three SQLite queries expressing the question are given, please choose the most accurate SQL based on the Checklist.
 ### SQLite SQL tables, with their properties:
 {schema_text}
 
@@ -16,27 +14,17 @@ accurate SQL based on the Checklist.
 ### Checklist:
 1. The SQL should accurately represent the question.
 2. The SQL should accurately use the given knowledge evidence.
-3. The SELECT clause should not include any additional columns that are not included
-in the question.
-4. The order of columns in the SELECT clause must be the same as the order in the
-question.
-5. Check if the operations are being performed correctly according to the column
-type.
+3. The SELECT clause should not include any additional columns that are not included in the question.
+4. The order of columns in the SELECT clause must be the same as the order in the question.
+5. Check if the operations are being performed correctly according to the column type.
 
-### INSTRUCTIONS - READ CAREFULLY:
-- Analyze each SQL candidate systematically using the checklist
-- Choose the best SQL (or first SQL if none satisfy all requirements)
-- You MUST output ONLY a valid JSON object. NO other text is allowed.
-- Do NOT include any explanations before or after the JSON
-- Do NOT include markdown code fences like ```json or ```
-- Do NOT include any introductory phrases like "Here is my analysis" or "Sure!"
-- Your ENTIRE response must be ONLY the JSON object starting with {{ and ending with }}
-- Make your BEST effort to provide valid JSON output with the correct SQL selection
-
-Your answer must be a SINGLE valid JSON object with this EXACT structure:
+### Instruction:
+- If the first SQL satisfies all the conditions of the checklist, please choose the first SQL. If not, move on to the next SQL.
+- If there’s no SQL that satisfies all the requirements on the checklist, just choose the first SQL.
+- Provide a detailed step-by-step explanation following the order of the checklist when checking whether each SQL satisfies the checklist.
+- Your answer should strictly follow the following json format.
 {{
-    "reasoning": "Concise, professional checklist-based analysis justifying the selection.",
-    "sql": "The final chosen SQL query."
+"reasoning": "", // The reasoning steps for choosing the best SQL.
+"sql": "", // The final chosen SQL.
 }}
-
 ### Your Answer:

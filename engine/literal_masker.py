@@ -6,11 +6,23 @@ in natural language questions and SQL queries with semantic placeholders.
 
 This provides better generalization than regex-based masking by understanding
 context and semantics.
+
+Uses outlines library for forced JSON output to ensure structured responses.
 """
 
 import json
 import re
 from typing import List, Dict, Any, Optional, Tuple
+
+try:
+    import outlines
+    from outlines.models import Transformers as OutlinesTransformers
+    OUTLINES_AVAILABLE = True
+except ImportError:
+    OUTLINES_AVAILABLE = False
+    outlines = None
+
+from json_schemas import QUESTION_MASKING_SCHEMA, SQL_MASKING_SCHEMA
 
 
 class LiteralMasker:
@@ -81,8 +93,54 @@ class LiteralMasker:
         """
         if text_type == "question":
             prompt = self._build_question_masking_prompt(text, schema, evidence)
+            json_schema = QUESTION_MASKING_SCHEMA
         else:
             prompt = self._build_sql_masking_prompt(text)
+            json_schema = SQL_MASKING_SCHEMA
+
+        # Try outlines if available
+        if OUTLINES_AVAILABLE and self.llm_client:
+            try:
+                import torch
+                from outlines.models import Transformers as OutlinesTransformers
+                
+                outlines_model = OutlinesTransformers(
+                    model_name=self.llm_client.model_name,
+                    device=self.llm_client.device,
+                    model_kwargs={
+                        "trust_remote_code": True,
+                        "low_cpu_mem_usage": True,
+                        "attn_implementation": "eager" if "gpt-oss" in self.llm_client.model_name.lower() else "sdpa",
+                    }
+                )
+                
+                generator = outlines.json(outlines_model, json_schema)
+                
+                # Apply chat template
+                messages = [
+                    {"role": "system", "content": "You are an expert SQL developer. Output valid JSON only."},
+                    {"role": "user", "content": prompt}
+                ]
+                
+                if self.llm_client.tokenizer.chat_template is not None:
+                    prompt_text = self.llm_client.tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True
+                    )
+                else:
+                    prompt_text = prompt
+                
+                result = generator(prompt_text, temperature=self.llm_client.temperature, max_tokens=self.llm_client.max_new_tokens)
+                
+                if text_type == "question":
+                    return result.get("masked_question", "")
+                else:
+                    return result.get("masked_text", "")
+                    
+            except Exception as e:
+                print(f"  Warning: outlines masking failed: {e}, using standard generation")
+                # Fall through to standard generation
 
         try:
             response = self.llm_client.generate(prompt)
@@ -97,26 +155,42 @@ class LiteralMasker:
 
     def _build_question_masking_prompt(self, question: str, schema: Optional[str] = None, evidence: Optional[str] = None) -> str:
         """Build prompt for masking a natural language question using prompt template."""
-        if self.prompt_manager and self.prompt_manager.templates.get("question_masking"):
-            # Use the prompt template from file
-            return self.prompt_manager.build_prompt(
-                name="question_masking",
-                schema=schema if schema else "",
-                question=question,
-                evidence=evidence if evidence else "",
-            )
-        else:
-            # Fallback to built-in prompt
+        import os
+        from config import get_config
+        config = get_config()
+        prompt_path = os.path.join(config.PROMPTS_DIR, "question_masking.txt")
+        
+        try:
+            with open(prompt_path, "r", encoding="utf-8") as f:
+                template = f.read()
+            
             schema_text = schema if schema else "Schema not provided"
             evidence_text = evidence if evidence else "None provided"
             
-            prompt = f"""### Given a DB schema and a question, mask the table name, column name, and values
-in the question.
+            return template.format(
+                schema_text=schema_text,
+                question=question,
+                evidence=evidence_text
+            )
+        except FileNotFoundError:
+            # Fallback to built-in prompt with examples from template
+            schema_text = schema if schema else "Schema not provided"
+            evidence_text = evidence if evidence else "None provided"
+
+            prompt = f"""### Given a DB schema and a question, mask the table name, column name, and values in the question.
 
 Use these placeholder types:
 - [TABLE] for table names
 - [COLUMN] for column names
 - [VALUE] for literal values (numbers, strings, dates, etc.)
+
+<example1>
+### SQLite SQL tables, with their properties:
+# customers ( CustomerID, Segment, Currency )
+# products ( ProductID, Description )
+### Question: For all the people who paid more than 29.00 per unit of product id No.5. Give their consumption status in the August of 2012.
+### Masked Question: For all the [TABLE] who paid more than [VALUE] per unit of [COLUMN] [VALUE]. Give their consumption status in the [VALUE].
+</example1>
 
 ### SQLite SQL tables, with their properties:
 {schema_text}
@@ -152,7 +226,7 @@ Do NOT replace column names, table names, SQL keywords, or function names. Only 
 ### Your Answer:"""
         return prompt
 
-    def _parse_masking_response(self, response: str, text_type: str) -> Optional[str]:
+    def _parse_masking_response(self, response: str, text_type: str) -> str:
         """
         Parse LLM response to extract masked text.
 
@@ -161,74 +235,63 @@ Do NOT replace column names, table names, SQL keywords, or function names. Only 
             text_type: Either "question" or "sql"
 
         Returns:
-            Extracted masked text or None if parsing fails
+            Extracted masked text
         """
-        import re
-        
         response = response.strip()
         
+        # Remove markdown code fences
+        if response.startswith("```"):
+            response = response[3:]
+            if response.startswith("json"):
+                response = response[4:]
+            response = response.strip()
+            if response.endswith("```"):
+                response = response[:-3]
+            response = response.strip()
+        
         if text_type == "question":
-            # Look for content after "### Masked Question:"
-            match = re.search(r"### Masked Question:\s*\n?(.+?)(?=###|\(|$)", response, re.DOTALL)
-            if match:
-                masked_text = match.group(1).strip()
-                if masked_text:
-                    # Clean up: remove any parenthetical instructions
-                    masked_text = re.sub(r'\s*\([^)]*\)\s*$', '', masked_text).strip()
-                    # Take only the first line
-                    first_line = masked_text.split('\n')[0].strip()
-                    if first_line and len(first_line) > 3:
-                        return first_line
+            # For question masking, look for "### Masked Question:" or just extract the masked text
+            if "### Masked Question:" in response:
+                parts = response.split("### Masked Question:")
+                if len(parts) > 1:
+                    return parts[1].strip()
             
-            # Fallback: The response itself might be the masked question
-            # Remove any "###" markers or instructions
-            lines = response.split('\n')
-            for line in lines:
-                line = line.strip()
-                if line and not line.startswith('###') and not line.lower().startswith(('here', 'the', 'answer', 'masked', 'respond')):
-                    # Remove parenthetical instructions
-                    line = re.sub(r'\s*\([^)]*\)\s*$', '', line).strip()
-                    if line and len(line) > 3:
-                        return line
+            # Try to find text after "Masked Question:"
+            if "Masked Question:" in response:
+                parts = response.split("Masked Question:")
+                if len(parts) > 1:
+                    return parts[1].strip()
             
-            return response if response else None
-
-        # For SQL: try to find JSON format (only if response starts with {)
-        if response.startswith('{'):
+            # Fallback: return the whole response trimmed
+            return response
+        else:
+            # For SQL masking, try to parse JSON
             try:
                 start_idx = response.find("{")
-                end_idx = response.rfind("}") + 1
-
-                if start_idx != -1 and end_idx > start_idx:
-                    json_str = response[start_idx:end_idx]
-                    result = json.loads(json_str)
-                    masked_text = result.get("masked_text", "")
-
-                    if masked_text:
-                        return masked_text
-            except Exception:
+                if start_idx != -1:
+                    end_idx = response.rfind("}") + 1
+                    if end_idx > start_idx:
+                        json_str = response[start_idx:end_idx]
+                        result = json.loads(json_str)
+                        return result.get("masked_text", response)
+            except:
                 pass
-
-        # Fallback for SQL: return the response after the last colon
-        if response:
-            parts = response.split('\n')
-            for part in reversed(parts):
-                if ':' in part:
-                    text = part.split(':', 1)[-1].strip()
-                    if text and len(text) > 5:
-                        return text
+            
+            # Fallback: look for "### Masked SQL:"
+            if "### Masked SQL:" in response:
+                parts = response.split("### Masked SQL:")
+                if len(parts) > 1:
+                    return parts[1].strip()
             
             return response
-
-        return None
 
 
 def mask_literals_regex(text: str) -> str:
     """
     Fallback regex-based literal masking.
-
+    
     Replace literals in text with placeholders.
-
+    
     Masks:
     - Numbers (integers, floats, percentages)
     - Quoted strings (single and double quotes)
@@ -281,9 +344,9 @@ def mask_literals_regex(text: str) -> str:
 def mask_sql_regex(sql: str) -> str:
     """
     Fallback regex-based SQL literal masking.
-
+    
     Mask literals in SQL queries.
-
+    
     Masks:
     - String literals in WHERE clauses
     - Numeric literals
@@ -317,18 +380,18 @@ def batch_mask(
 ) -> List[str]:
     """
     Mask literals in a batch of texts.
-
+    
     Args:
         texts: List of texts to mask
         masker: LiteralMasker instance
         text_type: Either "question" or "sql"
         batch_size: Size of batches for processing
-
+        
     Returns:
         List of masked texts
     """
     masked_texts = []
-
+    
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
         for text in batch:
@@ -337,5 +400,5 @@ def batch_mask(
             else:
                 masked = masker.mask_sql(text)
             masked_texts.append(masked)
-
+    
     return masked_texts

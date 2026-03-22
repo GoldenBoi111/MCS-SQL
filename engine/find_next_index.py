@@ -22,7 +22,7 @@ def find_next_index(benchmark_path: str, output_dir: str):
     
     Args:
         benchmark_path: Path to original benchmark JSON
-        output_dir: Directory containing gpu_X subdirectories
+        output_dir: Directory containing gpu_X subdirectories (or parent directory)
     """
     # Load original benchmark
     with open(benchmark_path, 'r') as f:
@@ -30,11 +30,13 @@ def find_next_index(benchmark_path: str, output_dir: str):
     
     print(f"Loaded benchmark: {len(benchmark)} questions")
     
-    # Load all completed question_ids from results
+    # Load all completed question_ids from results (search recursively)
     output_path = Path(output_dir)
     completed_qids = set()
+    total_results = 0
     
-    gpu_dirs = sorted([d for d in output_path.iterdir() if d.is_dir() and d.name.startswith("gpu_")])
+    # Find all gpu_X directories recursively
+    gpu_dirs = sorted([d for d in output_path.rglob("gpu_*") if d.is_dir()])
     
     for gpu_dir in gpu_dirs:
         results_file = gpu_dir / "benchmark_results.json"
@@ -45,20 +47,22 @@ def find_next_index(benchmark_path: str, output_dir: str):
                 qid = r.get("question_id")
                 if qid is not None:
                     completed_qids.add(qid)
-            print(f"  {gpu_dir.name}: {len(gpu_results)} results")
+            total_results += len(gpu_results)
+            print(f"  {gpu_dir.parent.name}/{gpu_dir.name}: {len(gpu_results)} results")
     
-    # Also check merged file
-    merged_file = output_path / "benchmark_results_merged.json"
-    if merged_file.exists():
+    # Also check merged files
+    for merged_file in output_path.rglob("benchmark_results_merged.json"):
         with open(merged_file, "r") as f:
             merged_results = json.load(f)
         for r in merged_results:
             qid = r.get("question_id")
             if qid is not None:
                 completed_qids.add(qid)
-        print(f"  Merged file: {len(merged_results)} results")
+        total_results += len(merged_results)
+        print(f"  Merged ({merged_file.parent.name}): {len(merged_results)} results")
     
     print(f"\nTotal completed question_ids: {len(completed_qids)}")
+    print(f"Total results (may include duplicates): {total_results}")
     
     # Find first unprocessed question in benchmark
     next_index = None

@@ -1,5 +1,4 @@
-### Given a database schema, question, and knowledge evidence, generate the correct
-sqlite SQL query for the question.
+### Given a database schema, question, and knowledge evidence, generate the correct sqlite SQL query for the question.
 
 ### Relevant examples from index:
 {examples}
@@ -7,7 +6,7 @@ sqlite SQL query for the question.
 ### SQLite SQL tables, with their properties:
 {schema_text}
 
-### Sample Table Contents:
+### Sample rows of each table in csv format:
 {sample_contents}
 
 ### Question:
@@ -16,18 +15,10 @@ sqlite SQL query for the question.
 ### Knowledge Evidence:
 {evidence}
 
-### INSTRUCTIONS - READ CAREFULLY:
-You MUST output ONLY a valid JSON object. NO other text is allowed.
-- Do NOT include any explanations before or after the JSON
-- Do NOT include markdown code fences like ```json or ```
-- Do NOT include any introductory phrases like "Here is the SQL" or "Sure!"
-- Your ENTIRE response must be ONLY the JSON object starting with {{ and ending with }}
-- Make your BEST effort to provide valid JSON output with the correct SQL query
-
-Your answer must be a SINGLE valid JSON object with this EXACT structure:
-{{
-    "reasoning": "Concise, professional reasoning describing the SQL construction approach.",
-    "sql": "The final generated SQL."
-}}
-
+You need to not only create the SQL, but also provide the detailed reasoning steps required to create the SQL. Your answer should strictly follow the following
+json format:
+{
+"reasoning": "", // The reasoning steps for generating SQL.
+"sql": "", // The final generated SQL.
+}
 ### Your Answer:

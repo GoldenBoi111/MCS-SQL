@@ -13,12 +13,14 @@ Each prompt generates n=20 responses, for a total of 100 SQL candidates.
 
 Two sampling methods for examples:
 1. Question Similarity-based: Select top-k questions with closest sentence embeddings
-2. Masked Question Similarity-based: Uses masked questions (literals replaced with 
+2. Masked Question Similarity-based: Uses masked questions (literals replaced with
    special tokens) to prevent collusion based on similar variable/literal names.
    Uses LLM to replace table names, column names, and values.
 
 Includes table schema and sample CSV rows to help LLM understand column/table contents.
 LLM provides reasoning for each generated SQL.
+
+Uses outlines library for forced JSON output to ensure structured responses.
 """
 
 import json
@@ -30,6 +32,12 @@ from dataclasses import dataclass
 import faiss
 import numpy as np
 from tqdm import tqdm
+
+try:
+    import outlines
+    OUTLINES_AVAILABLE = True
+except ImportError:
+    OUTLINES_AVAILABLE = False
 
 from config import Config
 from literal_masker import LiteralMasker

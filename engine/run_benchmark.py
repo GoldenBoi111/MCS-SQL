@@ -9,6 +9,8 @@ Confidence is calculated using: confidence(qi) = 1/N * Σ(exec(qi) = exec(qj))
 where N is the number of valid executions (excluding timeouts and syntax errors).
 Queries are grouped by execution result, with best execution speed as the normalizer.
 Returns queries with confidence > 0.2.
+
+Uses outlines library for forced JSON output to ensure structured responses.
 """
 
 import argparse
@@ -27,6 +29,24 @@ from pathlib import Path
 from typing import List, Dict, Any, Tuple
 
 import torch
+
+try:
+    import outlines
+    from outlines.models import Transformers as OutlinesTransformers
+    OUTLINES_AVAILABLE = True
+except ImportError:
+    OUTLINES_AVAILABLE = False
+    outlines = None
+
+# vLLM support
+try:
+    from vllm_model_manager import vLLMModelManager, vLLMAPIClient, create_vllm_manager
+    VLLM_AVAILABLE = True
+except ImportError:
+    VLLM_AVAILABLE = False
+    vllm_model_manager = None
+
+from json_schemas import SQL_GENERATION_SCHEMA, SQL_SELECTION_SCHEMA
 
 from config import Config
 from literal_masker import LiteralMasker
@@ -66,19 +86,49 @@ def load_benchmark(json_path: str) -> List[Dict[str, Any]]:
 
 def execute_sql_with_timeout(db_path: str, sql: str, timeout: int = 5) -> Tuple[bool, str, float]:
     """Execute SQL and return (success, result_string_or_error, execution_time)."""
+    import threading
+    
     start_time = time.time()
-    try:
-        conn = sqlite3.connect(db_path, timeout=timeout)
-        cursor = conn.cursor()
-        cursor.execute(sql)
-        results = cursor.fetchall()
-        conn.close()
-        exec_time = time.time() - start_time
-        # Convert to set of tuples for comparison (order-independent, like official BIRD EX)
-        res_set = frozenset(results)
-        return True, res_set, exec_time
-    except Exception as e:
-        exec_time = time.time() - start_time
+    result = {"success": False, "results": frozenset(), "error": None}
+    conn = None
+    
+    def execute_query():
+        nonlocal conn
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute(sql)
+            results = cursor.fetchall()
+            result["success"] = True
+            result["results"] = frozenset(results)
+            conn.close()
+        except Exception as e:
+            result["error"] = str(e)
+            if conn:
+                conn.close()
+    
+    # Run query in a thread
+    thread = threading.Thread(target=execute_query)
+    thread.start()
+    thread.join(timeout=timeout)
+    
+    exec_time = time.time() - start_time
+    
+    # If thread is still alive, query timed out
+    if thread.is_alive():
+        # Interrupt the connection to cancel the query
+        if conn:
+            try:
+                conn.interrupt()
+            except:
+                pass
+        thread.join(timeout=1)  # Give it a moment to clean up
+        return False, frozenset(), exec_time
+    
+    # Query completed (success or error)
+    if result["success"]:
+        return True, result["results"], exec_time
+    else:
         return False, frozenset(), exec_time
 
 
@@ -118,16 +168,16 @@ def get_sample_table_contents(db_path: str, tables: List[str], sample_size: int 
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        
+
         for table in tables:
             try:
-                # Get sample rows
-                cursor.execute(f"SELECT * FROM {table} LIMIT {sample_size}")
+                # Get sample rows - escape table name to handle reserved keywords
+                cursor.execute(f'SELECT * FROM "{table}" LIMIT {sample_size}')
                 rows = cursor.fetchall()
-                
+
                 # Get column names
                 column_names = [desc[0] for desc in cursor.description]
-                
+
                 # Format as CSV-like table
                 parts.append(f"Table: {table}")
                 parts.append(" | ".join(column_names))
@@ -138,7 +188,7 @@ def get_sample_table_contents(db_path: str, tables: List[str], sample_size: int 
             except Exception as e:
                 parts.append(f"Table: {table} (Error sampling: {e})")
                 parts.append("")
-        
+
         conn.close()
     except Exception as e:
         parts.append(f"Error connecting to database: {e}")
@@ -172,11 +222,14 @@ def run_benchmark(
     # Load existing results if they exist (for appending)
     results_file = os.path.join(output_dir, "benchmark_results.json")
     results_detail = []
+    completed_qids = set()
     if os.path.exists(results_file):
         with open(results_file, "r") as f:
             results_detail = json.load(f)
+        completed_qids = set(r.get("question_id") for r in results_detail if r.get("question_id"))
         print(f"Loaded {len(results_detail)} existing results from {results_file}")
-        print("New results will be appended to existing file")
+        print(f"Completed question_ids: {sorted(completed_qids)}")
+        print("Already-completed questions will be skipped")
 
     # Initialize error logger and memory manager
     error_logger = ErrorLogger(output_dir)
@@ -322,11 +375,38 @@ def run_benchmark(
                 linking_res = type('obj', (object,), {'tables': [], 'columns': []})
             else:
                 raise
+
+        # Filter tables: keep only tables that exist in the database schema
+        all_db_tables = set(full_schema.keys())
+        original_tables = linking_res.tables
+        linking_res.tables = [t for t in linking_res.tables if t in all_db_tables]
+        
+        # Log if any tables were removed
+        removed_tables = set(original_tables) - all_db_tables
+        if removed_tables:
+            print(f"  [WARNING] Removed {len(removed_tables)} hallucinated table(s): {removed_tables}")
+        
+        # Filter columns: keep only columns from valid tables that exist in the schema
+        valid_columns = []
+        for col_entry in linking_res.columns:
+            # Handle both "table.column" and just "column" formats
+            if "." in col_entry:
+                table_part, col_part = col_entry.split(".", 1)
+                if table_part in full_schema and col_part in full_schema[table_part]:
+                    valid_columns.append(col_entry)
+            else:
+                # If no table prefix, check if column exists in any selected table
+                for table in linking_res.tables:
+                    if col_entry in full_schema.get(table, []):
+                        valid_columns.append(f"{table}.{col_entry}")
+                        break
+        
+        linking_res.columns = valid_columns
         
         # Format the linked schema for the generator prompt
         linked_schema_dict = {t: full_schema[t] for t in linking_res.tables if t in full_schema}
         schema_text = linker.format_schema_for_prompt(linked_schema_dict)
-        print(f"  Schema Linking took {time.time() - t0:.2f}s (Found {len(linking_res.tables)} tables)")
+        print(f"  Schema Linking took {time.time() - t0:.2f}s (Found {len(linking_res.tables)} tables, {len(linking_res.columns)} columns)")
         
         # Cleanup large dictionary after building schema text
         del full_schema
@@ -752,15 +832,21 @@ def run_benchmark(
 
         # SQL Selection Phase: Use LLM to select the best SQL from all high-confidence candidates
         # Following the paper: present candidates as multiple-choice, sample n responses, majority vote
-        print("\n  Running SQL Selection Phase...")
         # Use ALL candidates that pass the confidence threshold (> 0.2), not just top 3
         high_conf_candidates = [c for c in high_conf_sqls if c['confidence'] > 0.2]
-        
+
         selected_sql = None
         selection_reasoning = None
         is_correct = False  # Will be set after selection
-        
-        if len(high_conf_candidates) > 0:
+
+        # Skip selection stage if only one valid candidate - use it directly
+        if len(high_conf_candidates) == 1:
+            print("\n  Only one high-confidence candidate - skipping selection stage")
+            selected_sql = high_conf_candidates[0]['sql']
+            selection_reasoning = "Single candidate - no selection needed"
+            representative_sql = selected_sql
+        elif len(high_conf_candidates) > 1:
+            print("\n  Running SQL Selection Phase...")
             # Format candidate SQLs as numbered list (multiple-choice format)
             # Max 5 can pass 0.2 threshold (mathematically), typically 1-3
             selection_candidates = high_conf_candidates[:5]

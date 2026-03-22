@@ -1,5 +1,4 @@
-### Given a DB schema and a question, mask the table name, column name, and values
-in the question.
+### Given a DB schema and a question, mask the table name, column name, and values in the question.
 
 Use these placeholder types:
 - [TABLE] for table names

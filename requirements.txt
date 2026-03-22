@@ -9,6 +9,17 @@ tqdm>=4.65.0
 # LLM and Transformers
 transformers>=4.35.0
 torch>=2.0.0
+outlines>=0.0.40
+
+# vLLM (for high-throughput generation with 120B+ models)
+# Install separately due to CUDA requirements:
+#   pip install vllm
+# Or with CUDA 12.1:
+#   pip install vllm --extra-index-url https://download.pytorch.org/whl/cu121
+vllm>=0.4.0
+
+# OpenAI client for vLLM API connection
+openai>=1.0.0
 
 # Database
 sqlite3

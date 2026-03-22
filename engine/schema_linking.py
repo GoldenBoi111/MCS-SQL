@@ -7,6 +7,8 @@ This module implements a two-stage schema linking approach:
 
 Both stages use LLM calls with shuffled prompts to improve robustness through
 majority voting.
+
+Uses outlines library for forced JSON output to ensure structured responses.
 """
 
 import json
@@ -14,6 +16,17 @@ import random
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from collections import defaultdict
+
+try:
+    import outlines
+    from outlines import models
+    from outlines.models import transformers
+    OUTLINES_AVAILABLE = True
+except ImportError:
+    OUTLINES_AVAILABLE = False
+    outlines = None
+
+from json_schemas import TABLE_LINKING_SCHEMA, COLUMN_LINKING_SCHEMA
 
 
 @dataclass
@@ -287,6 +300,72 @@ class TransformersLLMClient:
 
         return responses
 
+    def generate_json(self, prompt: str, json_schema: dict, temperature: Optional[float] = None) -> dict:
+        """
+        Generate structured JSON output using outlines library.
+        Forces the model to output valid JSON matching the provided schema.
+        
+        Args:
+            prompt: Input prompt string
+            json_schema: JSON schema dict defining the expected output structure
+            temperature: Optional temperature override
+            
+        Returns:
+            Generated response as a dictionary
+        """
+        if not OUTLINES_AVAILABLE:
+            # Fallback to standard generation if outlines not available
+            print("  Warning: outlines not available, using standard generation")
+            response = self.generate(prompt)
+            # Try to parse as JSON
+            try:
+                start_idx = response.find("{")
+                if start_idx != -1:
+                    end_idx = response.rfind("}") + 1
+                    if end_idx > start_idx:
+                        return json.loads(response[start_idx:end_idx])
+            except:
+                pass
+            return {}
+        
+        import torch
+        from outlines.models import Transformers as OutlinesTransformers
+        
+        # Use outlines model wrapper
+        outlines_model = OutlinesTransformers(
+            model_name=self.model_name,
+            device=self.device,
+            model_kwargs={
+                "trust_remote_code": True,
+                "low_cpu_mem_usage": True,
+                "attn_implementation": "eager" if "gpt-oss" in self.model_name.lower() else "sdpa",
+            }
+        )
+        
+        # Create structured generator with JSON schema
+        generator = outlines.json(outlines_model, json_schema)
+        
+        # Apply chat template
+        messages = [
+            {"role": "system", "content": "You are an expert SQL developer. Output valid JSON only."},
+            {"role": "user", "content": prompt}
+        ]
+        
+        if self.tokenizer.chat_template is not None:
+            prompt_text = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+        else:
+            prompt_text = prompt
+        
+        # Generate with forced JSON structure
+        temp = temperature if temperature is not None else self.temperature
+        result = generator(prompt_text, temperature=temp, max_tokens=self.max_new_tokens)
+        
+        return result
+
 
 class MultiModelManager:
     """
@@ -491,7 +570,8 @@ class SchemaLinker:
         print(tables)
         schema = {}
         for table in tables:
-            cursor.execute(f"PRAGMA table_info({table})")
+            # Escape table names with double quotes to handle reserved keywords
+            cursor.execute(f'PRAGMA table_info("{table}")')
             columns = [row[1] for row in cursor.fetchall()]
             schema[table] = columns
 
@@ -505,6 +585,8 @@ class SchemaLinker:
     ) -> str:
         """
         Format schema as text for LLM prompt.
+        Matches the format expected by prompt templates:
+        # table_name ( column1: type, column2: type, ... )
 
         Args:
             schema: Full database schema
@@ -518,10 +600,12 @@ class SchemaLinker:
 
         for table in tables:
             if table in schema:
-                columns = ", ".join(schema[table])
-                lines.append(f"Table: {table}\nColumns: {columns}")
+                columns = schema[table]
+                # Format: # table_name ( col1, col2, col3 )
+                col_str = ", ".join(columns)
+                lines.append(f"# {table} ( {col_str} )")
 
-        return "\n\n".join(lines)
+        return "\n".join(lines)
 
     def shuffle_schema_order(
         self,

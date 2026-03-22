@@ -6,74 +6,111 @@ and merges them into a single benchmark_results_merged.json file.
 
 Usage:
     python engine/merge_benchmark_results.py outputs/benchmark/start_0_end_125
+    python engine/merge_benchmark_results.py --output /path/to/output.json benchmark_results/
 """
 
+import argparse
 import json
 import os
 import sys
 from pathlib import Path
 
 
-def merge_results(output_dir: str):
+def merge_results(input_dir: str, output_file: str = None):
     """
-    Merge benchmark results from all gpu_X folders.
-    
+    Merge benchmark results from all benchmark_results.json files (searches recursively).
+
     Args:
-        output_dir: Directory containing gpu_X subdirectories
+        input_dir: Directory to search for benchmark_results.json files
+        output_file: Optional path for merged output file (default: input_dir/benchmark_results_merged.json)
     """
-    output_path = Path(output_dir)
-    
-    if not output_path.exists():
-        print(f"Error: Output directory does not exist: {output_dir}")
+    input_path = Path(input_dir)
+
+    if not input_path.exists():
+        print(f"Error: Input directory does not exist: {input_dir}")
         sys.exit(1)
-    
-    # Find all gpu_X directories
-    gpu_dirs = sorted([d for d in output_path.iterdir() if d.is_dir() and d.name.startswith("gpu_")])
-    
-    if not gpu_dirs:
-        print(f"Error: No gpu_X directories found in {output_dir}")
+
+    # Find all benchmark_results.json files recursively (exclude merged files)
+    results_files = sorted([f for f in input_path.rglob("benchmark_results.json") if "merged" not in f.name])
+
+    if not results_files:
+        print(f"Error: No benchmark_results.json files found in {input_dir}")
         sys.exit(1)
-    
-    print(f"Found {len(gpu_dirs)} GPU directories: {[d.name for d in gpu_dirs]}")
-    
-    # Load and merge results from each GPU
+
+    print(f"Found {len(results_files)} benchmark_results.json files:")
+    for f in results_files:
+        print(f"  - {f.relative_to(input_path)}")
+
+    # Load and merge results from each file (deduplicate by question_id)
     all_results = []
-    
-    for gpu_dir in gpu_dirs:
-        results_file = gpu_dir / "benchmark_results.json"
-        
-        if not results_file.exists():
-            print(f"  Warning: {results_file} not found, skipping...")
-            continue
-        
-        with open(results_file, "r") as f:
-            gpu_results = json.load(f)
-        
-        print(f"  {gpu_dir.name}: {len(gpu_results)} results")
-        all_results.extend(gpu_results)
-    
+    seen_qids = {}  # qid -> file where it was first seen
+    duplicates = 0
+    duplicate_details = []  # List of (qid, file) tuples for duplicates
+
+    for results_file in results_files:
+        try:
+            with open(results_file, "r") as f:
+                file_results = json.load(f)
+
+            # Add only unique question_ids
+            new_count = 0
+            file_duplicates = 0
+            for r in file_results:
+                qid = r.get("question_id")
+                if qid not in seen_qids:
+                    seen_qids[qid] = str(results_file.relative_to(input_path))
+                    all_results.append(r)
+                    new_count += 1
+                else:
+                    duplicates += 1
+                    file_duplicates += 1
+                    duplicate_details.append({
+                        "question_id": qid,
+                        "duplicate_file": str(results_file.relative_to(input_path)),
+                        "original_file": seen_qids[qid]
+                    })
+
+            dup_msg = f" ({file_duplicates} duplicates)" if file_duplicates > 0 else ""
+            print(f"  {results_file.relative_to(input_path)}: {new_count} new results ({len(file_results)} total){dup_msg}")
+        except Exception as e:
+            print(f"  Error loading {results_file}: {e}")
+
     if not all_results:
         print("Error: No results found to merge")
         sys.exit(1)
-    
+
     print(f"\nTotal merged results: {len(all_results)}")
+    print(f"Duplicate entries skipped: {duplicates}")
     
+    if duplicate_details:
+        print(f"\n⚠️  Duplicate question_ids found:")
+        for dup in duplicate_details[:20]:  # Show first 20
+            print(f"    ID {dup['question_id']}: in {dup['duplicate_file']} (already in {dup['original_file']})")
+        if len(duplicate_details) > 20:
+            print(f"    ... and {len(duplicate_details) - 20} more")
+
     # Sort by question_id if available
     try:
         all_results.sort(key=lambda x: x.get("question_id", 0))
         print("Results sorted by question_id")
     except Exception as e:
         print(f"Could not sort results: {e}")
+
+    # Determine output file path
+    if output_file:
+        merged_file = Path(output_file)
+        # Create parent directory if it doesn't exist
+        merged_file.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        merged_file = input_path / "benchmark_results_merged.json"
     
-    # Save merged results
-    merged_file = output_path / "benchmark_results_merged.json"
     with open(merged_file, "w") as f:
         json.dump(all_results, f, indent=2)
-    
+
     print(f"\nMerged results saved to: {merged_file}")
-    
-    # Generate detailed report
-    generate_detailed_report(all_results, str(output_path))
+
+    # Generate detailed report (save alongside merged file)
+    generate_detailed_report(all_results, str(merged_file.parent))
 
 
 def generate_detailed_report(results: list, output_dir: str):
@@ -245,11 +282,20 @@ def generate_detailed_report(results: list, output_dir: str):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python merge_benchmark_results.py <output_directory>")
-        print("\nExample:")
-        print("  python merge_benchmark_results.py outputs/benchmark/start_0_end_125")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Merge benchmark results from multiple GPU folders"
+    )
+    parser.add_argument(
+        "input_dir",
+        help="Directory to search for benchmark_results.json files"
+    )
+    parser.add_argument(
+        "--output", "-o",
+        dest="output_file",
+        default=None,
+        help="Output file path for merged results (default: <input_dir>/benchmark_results_merged.json)"
+    )
     
-    output_dir = sys.argv[1]
-    merge_results(output_dir)
+    args = parser.parse_args()
+    
+    merge_results(args.input_dir, args.output_file)
