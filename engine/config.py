@@ -60,7 +60,7 @@ class Config:
 
         # Model configuration
         self.EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-base-en-v1.5")
-        self.LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
+        self.LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "openai/gpt-oss-120b")
 
         # Prompts path
         self.PROMPTS_DIR = self._get_path("PROMPTS_DIR", self.PROJECT_ROOT / "prompts")

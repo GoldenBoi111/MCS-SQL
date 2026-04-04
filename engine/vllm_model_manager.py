@@ -3,7 +3,7 @@ vLLM Model Manager for MCS-SQL
 
 This module provides vLLM integration for the MCS-SQL benchmark, supporting:
 - Tensor parallelism across multiple GPUs (for 120B+ models)
-- Structured JSON output via guided decoding
+- Structured JSON output via xgrammar/guidance backends (vLLM v0.12.0+)
 - High-throughput batch generation
 - Continuous batching for variable-length sequences
 
@@ -22,7 +22,7 @@ Usage:
     result = manager.generate_json(prompt, SQL_GENERATION_SCHEMA)
 
     # Batch generation
-    results = manager.generate_batch(prompts, batch_size=32)
+    results = manager.generate_json_batch(prompts, SQL_GENERATION_SCHEMA, batch_size=32)
 """
 
 import json
@@ -33,9 +33,16 @@ import time
 
 try:
     from vllm import LLM, SamplingParams
+    # vLLM v0.12.0+ uses StructuredOutputsParams (replaces guided_json)
+    try:
+        from vllm.sampling_params import StructuredOutputsParams
+        HAS_STRUCTURED_OUTPUTS = True
+    except ImportError:
+        HAS_STRUCTURED_OUTPUTS = False
     VLLM_AVAILABLE = True
 except ImportError:
     VLLM_AVAILABLE = False
+    HAS_STRUCTURED_OUTPUTS = False
     print("Warning: vLLM not installed. Install with: pip install vllm")
 
 
@@ -256,22 +263,32 @@ class vLLMModelManager:
             json_schema: JSON schema dict for structured output
             max_tokens: Optional override for max tokens
             temperature: Optional override for temperature
-        
+
         Returns:
             Parsed JSON dictionary
         """
-        # Create sampling params with guided decoding
-        sampling_params = SamplingParams(
-            max_tokens=max_tokens if max_tokens else self.max_tokens,
-            temperature=temperature if temperature else self.temperature,
-            top_p=0.95,
-            guided_json=json_schema,  # vLLM's built-in JSON guidance
-        )
-        
+        # Create sampling params with structured outputs (vLLM v0.12.0+)
+        if HAS_STRUCTURED_OUTPUTS:
+            structured_outputs = StructuredOutputsParams(json=json_schema)
+            sampling_params = SamplingParams(
+                max_tokens=max_tokens if max_tokens else self.max_tokens,
+                temperature=temperature if temperature else self.temperature,
+                top_p=0.95,
+                structured_outputs=structured_outputs,
+            )
+        else:
+            # Fallback for older vLLM versions (pre-v0.12.0)
+            sampling_params = SamplingParams(
+                max_tokens=max_tokens if max_tokens else self.max_tokens,
+                temperature=temperature if temperature else self.temperature,
+                top_p=0.95,
+                guided_json=json_schema,
+            )
+
         # Generate with JSON constraint
         outputs = self.llm.generate([prompt], sampling_params)
         response = outputs[0].outputs[0].text
-        
+
         # Parse JSON response
         try:
             # Remove markdown code fences if present
@@ -282,7 +299,7 @@ class vLLMModelManager:
                 response = response[3:]
             if response.endswith("```"):
                 response = response[:-3].strip()
-            
+
             # Extract JSON object
             start_idx = response.find("{")
             if start_idx != -1:
@@ -290,15 +307,15 @@ class vLLMModelManager:
                 if end_idx > start_idx:
                     json_str = response[start_idx:end_idx]
                     return json.loads(json_str)
-            
+
             # Fallback: try parsing entire response
             return json.loads(response)
-        
+
         except json.JSONDecodeError as e:
             print(f"Warning: Failed to parse JSON response: {e}")
             print(f"Raw response: {response[:500]}...")
             return {"error": "JSON parsing failed", "raw_response": response}
-    
+
     def generate_json_batch(
         self,
         prompts: List[str],
@@ -324,13 +341,24 @@ class vLLMModelManager:
         """
         if not prompts:
             return []
-        
-        sampling_params = SamplingParams(
-            max_tokens=max_tokens if max_tokens else self.max_tokens,
-            temperature=temperature if temperature else self.temperature,
-            top_p=0.95,
-            guided_json=json_schema,
-        )
+
+        # Create sampling params with structured outputs (vLLM v0.12.0+)
+        if HAS_STRUCTURED_OUTPUTS:
+            structured_outputs = StructuredOutputsParams(json=json_schema)
+            sampling_params = SamplingParams(
+                max_tokens=max_tokens if max_tokens else self.max_tokens,
+                temperature=temperature if temperature else self.temperature,
+                top_p=0.95,
+                structured_outputs=structured_outputs,
+            )
+        else:
+            # Fallback for older vLLM versions (pre-v0.12.0)
+            sampling_params = SamplingParams(
+                max_tokens=max_tokens if max_tokens else self.max_tokens,
+                temperature=temperature if temperature else self.temperature,
+                top_p=0.95,
+                guided_json=json_schema,
+            )
         
         # Process in batches
         all_results = []
