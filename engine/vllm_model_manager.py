@@ -162,9 +162,11 @@ class vLLMModelManager:
             kv_cache_dtype=self.config.kv_cache_dtype,
             enable_chunked_prefill=self.config.enable_chunked_prefill,
             max_num_batched_tokens=self.config.max_num_batched_tokens,
-            enforce_eager=self.config.enforce_eager,
+            enforce_eager=True,  # Force eager mode to avoid compilation bugs
             trust_remote_code=self.config.trust_remote_code,
             dtype="bfloat16" if "gpt-oss" in self.model_name.lower() else "float16",
+            # Disable torch.compile to avoid FakeTensorMode attribute error
+            disable_log_stats=True,
         )
         
         print(f"  Model loaded successfully")
