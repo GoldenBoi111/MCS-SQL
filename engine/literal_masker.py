@@ -119,8 +119,42 @@ class LiteralMasker:
                 outlines_model = outlines.from_transformers(
                     self.llm_client.model,
                     self.llm_client.tokenizer,
-                    device=self.llm_client.device,
                 )
+
+                # Apply chat template
+                messages = [
+                    {
+                        "role": "system",
+                        "content": "You are an expert SQL developer. Output valid JSON only.",
+                    },
+                    {"role": "user", "content": prompt},
+                ]
+
+                if self.llm_client.tokenizer.chat_template is not None:
+                    prompt_text = self.llm_client.tokenizer.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True
+                    )
+                else:
+                    prompt_text = prompt
+
+                # Call the wrapped model directly with output_type parameter
+                # Use the model's temperature and max_new_tokens settings
+                result = outlines_model(
+                    prompt_text,
+                    output_type=json_schema,
+                )
+
+                # Extract the result appropriately based on the text type
+                if text_type == "question":
+                    return result.get("masked_question", "")
+                else:
+                    return result.get("masked_text", "")
+
+            except Exception as e:
+                print(f"  Warning: outlines masking failed: {e}")
+                # Don't silently fall back - let the error propagate so the caller handles it properly
+                # This preserves the benefits of structured output
+                raise
 
                 # Apply chat template
                 messages = [
