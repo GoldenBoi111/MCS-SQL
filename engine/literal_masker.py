@@ -17,6 +17,7 @@ from typing import List, Dict, Any, Optional, Tuple
 try:
     import outlines
     from outlines.models import Transformers as OutlinesTransformers
+
     OUTLINES_AVAILABLE = True
 except ImportError:
     OUTLINES_AVAILABLE = False
@@ -30,7 +31,9 @@ class LiteralMasker:
     Uses a transformer model to mask literals in text and SQL.
     """
 
-    def __init__(self, llm_client: Optional[Any] = None, prompt_manager: Optional[Any] = None):
+    def __init__(
+        self, llm_client: Optional[Any] = None, prompt_manager: Optional[Any] = None
+    ):
         """
         Initialize the literal masker.
 
@@ -44,7 +47,12 @@ class LiteralMasker:
         self.prompt_manager = prompt_manager
         self._use_llm = llm_client is not None
 
-    def mask_question(self, question: str, schema: Optional[str] = None, evidence: Optional[str] = None) -> str:
+    def mask_question(
+        self,
+        question: str,
+        schema: Optional[str] = None,
+        evidence: Optional[str] = None,
+    ) -> str:
         """
         Mask literals in a natural language question.
 
@@ -78,7 +86,13 @@ class LiteralMasker:
         else:
             return mask_sql_regex(sql)
 
-    def _mask_with_llm(self, text: str, text_type: str, schema: Optional[str] = None, evidence: Optional[str] = None) -> str:
+    def _mask_with_llm(
+        self,
+        text: str,
+        text_type: str,
+        schema: Optional[str] = None,
+        evidence: Optional[str] = None,
+    ) -> str:
         """
         Use LLM to mask literals in text.
 
@@ -101,45 +115,46 @@ class LiteralMasker:
         # Try outlines if available
         if OUTLINES_AVAILABLE and self.llm_client:
             try:
-                import torch
-                from outlines.models import Transformers as OutlinesTransformers
-                
-                outlines_model = OutlinesTransformers(
-                    model_name=self.llm_client.model_name,
+                # Use outlines.from_transformers to properly wrap the existing model
+                outlines_model = outlines.from_transformers(
+                    self.llm_client.model,
+                    self.llm_client.tokenizer,
                     device=self.llm_client.device,
-                    model_kwargs={
-                        "trust_remote_code": True,
-                        "low_cpu_mem_usage": True,
-                        "attn_implementation": "eager" if "gpt-oss" in self.llm_client.model_name.lower() else "sdpa",
-                    }
                 )
-                
-                generator = outlines.json(outlines_model, json_schema)
-                
+
                 # Apply chat template
                 messages = [
-                    {"role": "system", "content": "You are an expert SQL developer. Output valid JSON only."},
-                    {"role": "user", "content": prompt}
+                    {
+                        "role": "system",
+                        "content": "You are an expert SQL developer. Output valid JSON only.",
+                    },
+                    {"role": "user", "content": prompt},
                 ]
-                
+
                 if self.llm_client.tokenizer.chat_template is not None:
                     prompt_text = self.llm_client.tokenizer.apply_chat_template(
-                        messages,
-                        tokenize=False,
-                        add_generation_prompt=True
+                        messages, tokenize=False, add_generation_prompt=True
                     )
                 else:
                     prompt_text = prompt
-                
-                result = generator(prompt_text, temperature=self.llm_client.temperature, max_tokens=self.llm_client.max_new_tokens)
-                
+
+                # Call the wrapped model directly with output_type parameter
+                result = outlines_model(
+                    prompt_text,
+                    output_type=json_schema,
+                    temperature=self.llm_client.temperature,
+                    max_tokens=self.llm_client.max_new_tokens,
+                )
+
                 if text_type == "question":
                     return result.get("masked_question", "")
                 else:
                     return result.get("masked_text", "")
-                    
+
             except Exception as e:
-                print(f"  Warning: outlines masking failed: {e}, using standard generation")
+                print(
+                    f"  Warning: outlines masking failed: {e}, using standard generation"
+                )
                 # Fall through to standard generation
 
         try:
@@ -148,29 +163,41 @@ class LiteralMasker:
             if masked_text and len(masked_text) > 0:
                 return masked_text
             # If parsing returned empty/None, fall back to regex
-            return mask_literals_regex(text) if text_type == "question" else mask_sql_regex(text)
+            return (
+                mask_literals_regex(text)
+                if text_type == "question"
+                else mask_sql_regex(text)
+            )
         except Exception as e:
             # On any error, fall back to regex
-            return mask_literals_regex(text) if text_type == "question" else mask_sql_regex(text)
+            return (
+                mask_literals_regex(text)
+                if text_type == "question"
+                else mask_sql_regex(text)
+            )
 
-    def _build_question_masking_prompt(self, question: str, schema: Optional[str] = None, evidence: Optional[str] = None) -> str:
+    def _build_question_masking_prompt(
+        self,
+        question: str,
+        schema: Optional[str] = None,
+        evidence: Optional[str] = None,
+    ) -> str:
         """Build prompt for masking a natural language question using prompt template."""
         import os
         from config import get_config
+
         config = get_config()
         prompt_path = os.path.join(config.PROMPTS_DIR, "question_masking.txt")
-        
+
         try:
             with open(prompt_path, "r", encoding="utf-8") as f:
                 template = f.read()
-            
+
             schema_text = schema if schema else "Schema not provided"
             evidence_text = evidence if evidence else "None provided"
-            
+
             return template.format(
-                schema_text=schema_text,
-                question=question,
-                evidence=evidence_text
+                schema_text=schema_text, question=question, evidence=evidence_text
             )
         except FileNotFoundError:
             # Fallback to built-in prompt with examples from template
@@ -238,7 +265,7 @@ Do NOT replace column names, table names, SQL keywords, or function names. Only 
             Extracted masked text
         """
         response = response.strip()
-        
+
         # Remove markdown code fences
         if response.startswith("```"):
             response = response[3:]
@@ -248,20 +275,20 @@ Do NOT replace column names, table names, SQL keywords, or function names. Only 
             if response.endswith("```"):
                 response = response[:-3]
             response = response.strip()
-        
+
         if text_type == "question":
             # For question masking, look for "### Masked Question:" or just extract the masked text
             if "### Masked Question:" in response:
                 parts = response.split("### Masked Question:")
                 if len(parts) > 1:
                     return parts[1].strip()
-            
+
             # Try to find text after "Masked Question:"
             if "Masked Question:" in response:
                 parts = response.split("Masked Question:")
                 if len(parts) > 1:
                     return parts[1].strip()
-            
+
             # Fallback: return the whole response trimmed
             return response
         else:
@@ -276,22 +303,22 @@ Do NOT replace column names, table names, SQL keywords, or function names. Only 
                         return result.get("masked_text", response)
             except:
                 pass
-            
+
             # Fallback: look for "### Masked SQL:"
             if "### Masked SQL:" in response:
                 parts = response.split("### Masked SQL:")
                 if len(parts) > 1:
                     return parts[1].strip()
-            
+
             return response
 
 
 def mask_literals_regex(text: str) -> str:
     """
     Fallback regex-based literal masking.
-    
+
     Replace literals in text with placeholders.
-    
+
     Masks:
     - Numbers (integers, floats, percentages)
     - Quoted strings (single and double quotes)
@@ -303,40 +330,42 @@ def mask_literals_regex(text: str) -> str:
     masked = text
 
     # Mask currency codes (3-letter uppercase, common pattern)
-    currency_pattern = r'\b(AED|AFN|ALL|AMD|ANG|AOA|ARS|AUD|AWG|AZN|BAM|BBD|BDT|BGN|BHD|BIF|BMD|BND|BOB|BRL|BSD|BTN|BWP|BYN|BZD|CAD|CDF|CHF|CLP|CNY|COP|CRC|CUP|CVE|CZK|DJF|DKK|DOP|DZD|EGP|ERN|ETB|EUR|FJD|FKP|GBP|GEL|GHS|GIP|GMD|GNF|GTQ|GYD|HKD|HNL|HRK|HTG|HUF|IDR|ILS|INR|IQD|IRR|ISK|JMD|JOD|JPY|KES|KGS|KHR|KMF|KPW|KRW|KWD|KYD|KZT|LAK|LBP|LKR|LRD|LSL|LYD|MAD|MDL|MGA|MKD|MMK|MNT|MOP|MRU|MUR|MVR|MWK|MXN|MYR|MZN|NAD|NGN|NIO|NOK|NPR|NZD|OMR|PAB|PEN|PGK|PHP|PKR|PLN|PYG|QAR|RON|RSD|RUB|RWF|SAR|SBD|SCR|SDG|SEK|SGD|SHP|SLL|SOS|SRD|SSP|STN|SYP|SZL|THB|TJS|TMT|TND|TOP|TRY|TTD|TWD|TZS|UAH|UGX|USD|UYU|UZS|VES|VND|VUV|WST|XAF|XCD|XOF|XPF|YER|ZAR|ZMW|ZWL)\b'
-    masked = re.sub(currency_pattern, '[CURRENCY]', masked)
+    currency_pattern = r"\b(AED|AFN|ALL|AMD|ANG|AOA|ARS|AUD|AWG|AZN|BAM|BBD|BDT|BGN|BHD|BIF|BMD|BND|BOB|BRL|BSD|BTN|BWP|BYN|BZD|CAD|CDF|CHF|CLP|CNY|COP|CRC|CUP|CVE|CZK|DJF|DKK|DOP|DZD|EGP|ERN|ETB|EUR|FJD|FKP|GBP|GEL|GHS|GIP|GMD|GNF|GTQ|GYD|HKD|HNL|HRK|HTG|HUF|IDR|ILS|INR|IQD|IRR|ISK|JMD|JOD|JPY|KES|KGS|KHR|KMF|KPW|KRW|KWD|KYD|KZT|LAK|LBP|LKR|LRD|LSL|LYD|MAD|MDL|MGA|MKD|MMK|MNT|MOP|MRU|MUR|MVR|MWK|MXN|MYR|MZN|NAD|NGN|NIO|NOK|NPR|NZD|OMR|PAB|PEN|PGK|PHP|PKR|PLN|PYG|QAR|RON|RSD|RUB|RWF|SAR|SBD|SCR|SDG|SEK|SGD|SHP|SLL|SOS|SRD|SSP|STN|SYP|SZL|THB|TJS|TMT|TND|TOP|TRY|TTD|TWD|TZS|UAH|UGX|USD|UYU|UZS|VES|VND|VUV|WST|XAF|XCD|XOF|XPF|YER|ZAR|ZMW|ZWL)\b"
+    masked = re.sub(currency_pattern, "[CURRENCY]", masked)
 
     # Mask quoted strings (double quotes)
-    masked = re.sub(r'"[^"]*"', '[STRING]', masked)
+    masked = re.sub(r'"[^"]*"', "[STRING]", masked)
 
     # Mask quoted strings (single quotes)
-    masked = re.sub(r"'[^']*'", '[STRING]', masked)
+    masked = re.sub(r"'[^']*'", "[STRING]", masked)
 
     # Mask dates (YYYY-MM-DD, YYYY/MM/DD, MM/DD/YYYY, etc.)
     date_patterns = [
-        r'\b\d{4}-\d{2}-\d{2}\b',  # 2023-01-15
-        r'\b\d{4}/\d{2}/\d{2}\b',  # 2023/01/15
-        r'\b\d{2}/\d{2}/\d{4}\b',  # 01/15/2023
-        r'\b\d{2}-\d{2}-\d{4}\b',  # 01-15-2023
-        r'\b\d{4}\d{2}\d{2}\b',    # 20230115
+        r"\b\d{4}-\d{2}-\d{2}\b",  # 2023-01-15
+        r"\b\d{4}/\d{2}/\d{2}\b",  # 2023/01/15
+        r"\b\d{2}/\d{2}/\d{4}\b",  # 01/15/2023
+        r"\b\d{2}-\d{2}-\d{4}\b",  # 01-15-2023
+        r"\b\d{4}\d{2}\d{2}\b",  # 20230115
     ]
     for pattern in date_patterns:
-        masked = re.sub(pattern, '[DATE]', masked)
+        masked = re.sub(pattern, "[DATE]", masked)
 
     # Mask percentages
-    masked = re.sub(r'\b\d+\.?\d*\s*%', '[PERCENT]', masked)
+    masked = re.sub(r"\b\d+\.?\d*\s*%", "[PERCENT]", masked)
 
     # Mask floating point numbers
-    masked = re.sub(r'\b\d+\.\d+\b', '[NUMBER]', masked)
+    masked = re.sub(r"\b\d+\.\d+\b", "[NUMBER]", masked)
 
     # Mask integers (standalone)
-    masked = re.sub(r'\b\d+\b', '[NUMBER]', masked)
+    masked = re.sub(r"\b\d+\b", "[NUMBER]", masked)
 
     # Mask boolean values
-    masked = re.sub(r'\b(TRUE|FALSE|True|False|true|false)\b', '[BOOL]', masked)
+    masked = re.sub(r"\b(TRUE|FALSE|True|False|true|false)\b", "[BOOL]", masked)
 
     # Mask NULL/None values
-    masked = re.sub(r'\b(NULL|None|null|none|N/A|NA)\b', '[NULL]', masked, flags=re.IGNORECASE)
+    masked = re.sub(
+        r"\b(NULL|None|null|none|N/A|NA)\b", "[NULL]", masked, flags=re.IGNORECASE
+    )
 
     return masked
 
@@ -344,9 +373,9 @@ def mask_literals_regex(text: str) -> str:
 def mask_sql_regex(sql: str) -> str:
     """
     Fallback regex-based SQL literal masking.
-    
+
     Mask literals in SQL queries.
-    
+
     Masks:
     - String literals in WHERE clauses
     - Numeric literals
@@ -380,18 +409,18 @@ def batch_mask(
 ) -> List[str]:
     """
     Mask literals in a batch of texts.
-    
+
     Args:
         texts: List of texts to mask
         masker: LiteralMasker instance
         text_type: Either "question" or "sql"
         batch_size: Size of batches for processing
-        
+
     Returns:
         List of masked texts
     """
     masked_texts = []
-    
+
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
         for text in batch:
@@ -400,5 +429,5 @@ def batch_mask(
             else:
                 masked = masker.mask_sql(text)
             masked_texts.append(masked)
-    
+
     return masked_texts
