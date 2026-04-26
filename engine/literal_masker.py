@@ -12,7 +12,12 @@ Uses outlines library for forced JSON output to ensure structured responses.
 
 import json
 import re
+import logging
 from typing import List, Dict, Any, Optional, Tuple
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 try:
     import outlines
@@ -47,6 +52,48 @@ class LiteralMasker:
         self.llm_client = llm_client
         self.prompt_manager = prompt_manager
         self._use_llm = llm_client is not None
+
+        # Cache Pydantic models for better performance
+        if OUTLINES_AVAILABLE:
+            try:
+                # Pre-convert schemas to Pydantic models
+                question_schema = get_schema_for_task("question_masking")
+                sql_schema = get_schema_for_task("sql_masking")
+
+                self.question_model = json_schema_dict_to_pydantic(
+                    question_schema, "QuestionMaskingResult"
+                )
+                self.sql_model = json_schema_dict_to_pydantic(
+                    sql_schema, "SQLMaskingResult"
+                )
+            except Exception as e:
+                logger.error(f"Failed to cache Pydantic models: {e}")
+                self.question_model = None
+                self.sql_model = None
+        else:
+            self.question_model = None
+            self.sql_model = None
+
+        # Cache Pydantic models for better performance
+        if OUTLINES_AVAILABLE:
+            try:
+                # Pre-convert schemas to Pydantic models
+                question_schema = get_schema_for_task("question_masking")
+                sql_schema = get_schema_for_task("sql_masking")
+
+                self.question_model = json_schema_dict_to_pydantic(
+                    question_schema, "QuestionMaskingResult"
+                )
+                self.sql_model = json_schema_dict_to_pydantic(
+                    sql_schema, "SQLMaskingResult"
+                )
+            except Exception as e:
+                logger.error(f"Failed to cache Pydantic models: {e}")
+                self.question_model = None
+                self.sql_model = None
+        else:
+            self.question_model = None
+            self.sql_model = None
 
     def mask_question(
         self,
@@ -140,51 +187,94 @@ class LiteralMasker:
 
                 # Call the wrapped model directly with output_type parameter
                 if text_type == "question":
-                    # Convert dictionary schemas to Pydantic models using outlines utility
-                    question_model = json_schema_dict_to_pydantic(
-                        json_schema, "QuestionMaskingResult"
-                    )
-                    try:
-                        result = outlines_model(prompt_text, output_type=question_model)
-                        # Check if result is a proper Pydantic model with the expected attribute
-                        if hasattr(result, "masked_question"):
-                            return result.masked_question
-                        else:
-                            # If we get a string or other type, return it directly
-                            print(result)
-                            return str(result)
-                    except Exception:
-                        # If any error occurs during outlines processing, fall back to standard generation
+                    # Use cached question model
+                    if self.question_model is not None:
+                        try:
+                            result = outlines_model(
+                                prompt_text, output_type=self.question_model
+                            )
+                            # Validate that result is a proper Pydantic model
+                            if hasattr(result, "masked_question"):
+                                return result.masked_question
+                            else:
+                                logger.warning(
+                                    "Outlines returned non-Pydantic result for question masking"
+                                )
+                                # Fallback to string representation
+                                return str(result)
+                        except Exception as e:
+                            logger.error(f"Outlines question masking failed: {e}")
+                            # Fall back to standard generation approach
+                            response = self.llm_client.generate(prompt)
+                            masked_text = self._parse_masking_response(
+                                response, text_type
+                            )
+                            if masked_text and len(masked_text) > 0:
+                                return masked_text
+                            # If parsing failed, fall back to regex
+                            logger.info("Falling back to regex masking for question")
+                            return (
+                                mask_literals_regex(text)
+                                if text_type == "question"
+                                else mask_sql_regex(text)
+                            )
+                    else:
+                        # Fallback if models not available
+                        logger.warning(
+                            "Question model not available, falling back to standard generation"
+                        )
                         response = self.llm_client.generate(prompt)
                         masked_text = self._parse_masking_response(response, text_type)
                         if masked_text and len(masked_text) > 0:
                             return masked_text
-                        # If parsing failed, fall back to regex
+                        logger.info("Falling back to regex masking for question")
                         return (
                             mask_literals_regex(text)
                             if text_type == "question"
                             else mask_sql_regex(text)
                         )
                 else:
-                    # Convert dictionary schemas to Pydantic models using outlines utility
-                    sql_model = json_schema_dict_to_pydantic(
-                        json_schema, "SQLMaskingResult"
-                    )
-                    try:
-                        result = outlines_model(prompt_text, output_type=sql_model)
-                        # Check if result is a proper Pydantic model with the expected attribute
-                        if hasattr(result, "masked_text"):
-                            return result.masked_text
-                        else:
-                            # If we get a string or other type, return it directly
-                            return str(result)
-                    except Exception:
-                        # If any error occurs during outlines processing, fall back to standard generation
+                    # Use cached SQL model
+                    if self.sql_model is not None:
+                        try:
+                            result = outlines_model(
+                                prompt_text, output_type=self.sql_model
+                            )
+                            # Validate that result is a proper Pydantic model
+                            if hasattr(result, "masked_text"):
+                                return result.masked_text
+                            else:
+                                logger.warning(
+                                    "Outlines returned non-Pydantic result for SQL masking"
+                                )
+                                # Fallback to string representation
+                                return str(result)
+                        except Exception as e:
+                            logger.error(f"Outlines SQL masking failed: {e}")
+                            # Fall back to standard generation approach
+                            response = self.llm_client.generate(prompt)
+                            masked_text = self._parse_masking_response(
+                                response, text_type
+                            )
+                            if masked_text and len(masked_text) > 0:
+                                return masked_text
+                            # If parsing failed, fall back to regex
+                            logger.info("Falling back to regex masking for SQL")
+                            return (
+                                mask_literals_regex(text)
+                                if text_type == "question"
+                                else mask_sql_regex(text)
+                            )
+                    else:
+                        # Fallback if models not available
+                        logger.warning(
+                            "SQL model not available, falling back to standard generation"
+                        )
                         response = self.llm_client.generate(prompt)
                         masked_text = self._parse_masking_response(response, text_type)
                         if masked_text and len(masked_text) > 0:
                             return masked_text
-                        # If parsing failed, fall back to regex
+                        logger.info("Falling back to regex masking for SQL")
                         return (
                             mask_literals_regex(text)
                             if text_type == "question"
