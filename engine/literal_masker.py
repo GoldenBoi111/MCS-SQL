@@ -17,6 +17,7 @@ from typing import List, Dict, Any, Optional, Tuple
 try:
     import outlines
     from outlines.models import Transformers as OutlinesTransformers
+    from outlines.types.json_schema_utils import json_schema_dict_to_pydantic
 
     OUTLINES_AVAILABLE = True
 except ImportError:
@@ -115,6 +116,14 @@ class LiteralMasker:
         # Try outlines if available
         if OUTLINES_AVAILABLE and self.llm_client:
             try:
+                # Convert dictionary schemas to Pydantic models using outlines utility
+                question_model = json_schema_dict_to_pydantic(
+                    QUESTION_MASKING_SCHEMA, "QuestionMaskingResult"
+                )
+                sql_model = json_schema_dict_to_pydantic(
+                    SQL_MASKING_SCHEMA, "SQLMaskingResult"
+                )
+
                 # Use outlines.from_transformers to properly wrap the existing model
                 outlines_model = outlines.from_transformers(
                     self.llm_client.model,
@@ -138,23 +147,28 @@ class LiteralMasker:
                     prompt_text = prompt
 
                 # Call the wrapped model directly with output_type parameter
-                # Use the model's temperature and max_new_tokens settings
-                result = outlines_model(
-                    prompt_text,
-                    output_type=json_schema,
-                )
-
-                # Extract the result appropriately based on the text type
                 if text_type == "question":
-                    return result.get("masked_question", "")
+                    result = outlines_model(prompt_text, output_type=question_model)
+                    return result.masked_question
                 else:
-                    return result.get("masked_text", "")
+                    result = outlines_model(prompt_text, output_type=sql_model)
+                    return result.masked_text
 
             except Exception as e:
-                print(f"  Warning: outlines masking failed: {e}")
-                # Don't silently fall back - let the error propagate so the caller handles it properly
-                # This preserves the benefits of structured output
-                raise
+                print(
+                    f"  Warning: outlines masking failed: {e}, falling back to standard generation"
+                )
+                # Fall back to standard generation approach
+                response = self.llm_client.generate(prompt)
+                masked_text = self._parse_masking_response(response, text_type)
+                if masked_text and len(masked_text) > 0:
+                    return masked_text
+                # If parsing failed, fall back to regex
+                return (
+                    mask_literals_regex(text)
+                    if text_type == "question"
+                    else mask_sql_regex(text)
+                )
 
                 # Apply chat template
                 messages = [
