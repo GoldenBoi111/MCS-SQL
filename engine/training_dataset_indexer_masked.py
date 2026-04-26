@@ -521,6 +521,13 @@ class MaskedTrainingDatasetIndexer:
                             orig_question, schema=schema, evidence=evidence
                         )
                         masked_sql = self.literal_masker.mask_sql(orig_sql)
+                        
+                        # Print the results
+                        print(f"Original question: {orig_question}")
+                        print(f"Masked question:   {masked_question}")
+                        print(f"Original SQL:      {orig_sql}")
+                        print(f"Masked SQL:        {masked_sql}")
+                        print("-" * 80)
 
                         masked_questions.append(masked_question)
                         original_questions.append(orig_question)
