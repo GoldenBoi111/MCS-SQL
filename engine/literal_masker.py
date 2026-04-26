@@ -116,10 +116,78 @@ class LiteralMasker:
         # Try outlines if available
         if OUTLINES_AVAILABLE and self.llm_client:
             try:
-                # Convert dictionary schemas to Pydantic models using outlines utility
-                question_model = json_schema_dict_to_pydantic(
-                    QUESTION_MASKING_SCHEMA, "QuestionMaskingResult"
+                # Use outlines.from_transformers to properly wrap the existing model
+                outlines_model = outlines.from_transformers(
+                    self.llm_client.model,
+                    self.llm_client.tokenizer,
                 )
+
+                # Apply chat template
+                messages = [
+                    {
+                        "role": "system",
+                        "content": "You are an expert SQL developer. Output valid JSON only.",
+                    },
+                    {"role": "user", "content": prompt},
+                ]
+
+                if self.llm_client.tokenizer.chat_template is not None:
+                    prompt_text = self.llm_client.tokenizer.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True
+                    )
+                else:
+                    prompt_text = prompt
+
+                # Call the wrapped model directly with output_type parameter
+                if text_type == "question":
+                    # Convert dictionary schemas to Pydantic models using outlines utility
+                    question_model = json_schema_dict_to_pydantic(
+                        json_schema, "QuestionMaskingResult"
+                    )
+                    result = outlines_model(prompt_text, output_type=question_model)
+                    return result.masked_question
+                else:
+                    # Convert dictionary schemas to Pydantic models using outlines utility
+                    sql_model = json_schema_dict_to_pydantic(
+                        json_schema, "SQLMaskingResult"
+                    )
+                    result = outlines_model(prompt_text, output_type=sql_model)
+                    return result.masked_text
+
+            except Exception as e:
+                print(
+                    f"  Warning: outlines masking failed: {e}, falling back to standard generation"
+                )
+                # Fall back to standard generation approach
+                response = self.llm_client.generate(prompt)
+                masked_text = self._parse_masking_response(response, text_type)
+                if masked_text and len(masked_text) > 0:
+                    return masked_text
+                # If parsing failed, fall back to regex
+                return (
+                    mask_literals_regex(text)
+                    if text_type == "question"
+                    else mask_sql_regex(text)
+                )
+
+        try:
+            response = self.llm_client.generate(prompt)
+            masked_text = self._parse_masking_response(response, text_type)
+            if masked_text and len(masked_text) > 0:
+                return masked_text
+            # If parsing returned empty/None, fall back to regex
+            return (
+                mask_literals_regex(text)
+                if text_type == "question"
+                else mask_sql_regex(text)
+            )
+        except Exception as e:
+            # On any error, fall back to regex
+            return (
+                mask_literals_regex(text)
+                if text_type == "question"
+                else mask_sql_regex(text)
+            )
                 sql_model = json_schema_dict_to_pydantic(
                     SQL_MASKING_SCHEMA, "SQLMaskingResult"
                 )
@@ -148,15 +216,10 @@ class LiteralMasker:
 
                 # Call the wrapped model directly with output_type parameter
                 if text_type == "question":
-<<<<<<< HEAD
                     result = outlines_model(prompt_text, output_type=question_model)
                     return result.masked_question
                 else:
                     result = outlines_model(prompt_text, output_type=sql_model)
-=======
-                    return result.masked_question
-                else:
->>>>>>> 86dac3f046686412c007492d784d6451e68ed03e
                     return result.masked_text
 
             except Exception as e:
@@ -175,40 +238,7 @@ class LiteralMasker:
                     else mask_sql_regex(text)
                 )
 
-                # Apply chat template
-                messages = [
-                    {
-                        "role": "system",
-                        "content": "You are an expert SQL developer. Output valid JSON only.",
-                    },
-                    {"role": "user", "content": prompt},
-                ]
 
-                if self.llm_client.tokenizer.chat_template is not None:
-                    prompt_text = self.llm_client.tokenizer.apply_chat_template(
-                        messages, tokenize=False, add_generation_prompt=True
-                    )
-                else:
-                    prompt_text = prompt
-
-                # Call the wrapped model directly with output_type parameter
-                result = outlines_model(
-                    prompt_text,
-                    output_type=json_schema,
-                    temperature=self.llm_client.temperature,
-                    max_tokens=self.llm_client.max_new_tokens,
-                )
-
-                if text_type == "question":
-                    return result.get("masked_question", "")
-                else:
-                    return result.get("masked_text", "")
-
-            except Exception as e:
-                print(
-                    f"  Warning: outlines masking failed: {e}, using standard generation"
-                )
-                # Fall through to standard generation
 
         try:
             response = self.llm_client.generate(prompt)
