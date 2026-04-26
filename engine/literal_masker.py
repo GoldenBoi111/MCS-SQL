@@ -147,10 +147,11 @@ class LiteralMasker:
                     try:
                         result = outlines_model(prompt_text, output_type=question_model)
                         # Check if result is a proper Pydantic model with the expected attribute
-                        if hasattr(result, 'masked_question'):
+                        if hasattr(result, "masked_question"):
                             return result.masked_question
                         else:
                             # If we get a string or other type, return it directly
+                            print(result)
                             return str(result)
                     except Exception:
                         # If any error occurs during outlines processing, fall back to standard generation
@@ -172,7 +173,7 @@ class LiteralMasker:
                     try:
                         result = outlines_model(prompt_text, output_type=sql_model)
                         # Check if result is a proper Pydantic model with the expected attribute
-                        if hasattr(result, 'masked_text'):
+                        if hasattr(result, "masked_text"):
                             return result.masked_text
                         else:
                             # If we get a string or other type, return it directly
@@ -189,56 +190,6 @@ class LiteralMasker:
                             if text_type == "question"
                             else mask_sql_regex(text)
                         )
-                    except Exception:
-                        # If any error occurs during outlines processing, fall back to standard generation
-                        response = self.llm_client.generate(prompt)
-                        masked_text = self._parse_masking_response(response, text_type)
-                        if masked_text and len(masked_text) > 0:
-                            return masked_text
-                        # If parsing failed, fall back to regex
-                        return (
-                            mask_literals_regex(text)
-                            if text_type == "question"
-                            else mask_sql_regex(text)
-                        )
-                else:
-                    # Convert dictionary schemas to Pydantic models using outlines utility
-                    sql_model = json_schema_dict_to_pydantic(
-                        json_schema, "SQLMaskingResult"
-                    )
-                    try:
-                        result = outlines_model(prompt_text, output_type=sql_model)
-                        # Check if result is a proper Pydantic model with the expected attribute
-                        if hasattr(result, 'masked_text'):
-                            return result.masked_text
-                        else:
-                            # If we get a string or other type, return it directly
-                            return str(result)
-                    except Exception:
-                        # If any error occurs during outlines processing, fall back to standard generation
-                        response = self.llm_client.generate(prompt)
-                        masked_text = self._parse_masking_response(response, text_type)
-                        if masked_text and len(masked_text) > 0:
-                            return masked_text
-                        # If parsing failed, fall back to regex
-                        return (
-                            mask_literals_regex(text)
-                            if text_type == "question"
-                            else mask_sql_regex(text)
-                        )
-                else:
-                    # Convert dictionary schemas to Pydantic models using outlines utility
-                    sql_model = json_schema_dict_to_pydantic(
-                        json_schema, "SQLMaskingResult"
-                    )
-                    result = outlines_model(prompt_text, output_type=sql_model)
-                    # Ensure we get a proper result object
-                    if hasattr(result, "masked_text"):
-                        return result.masked_text
-                    else:
-                        # If result is not a proper object, try to extract from string
-                        return str(result)
-
             except Exception as e:
                 print(
                     f"  Warning: outlines masking failed: {e}, falling back to standard generation"
