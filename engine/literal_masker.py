@@ -190,6 +190,120 @@ class LiteralMasker:
                     # Use cached question model
                     if self.question_model is not None:
                         try:
+                            result = outlines_model(prompt_text, output_type=self.question_model)
+                            # Outlines returns a JSON string, not a Pydantic object
+                            # Parse it to extract the masked question
+                            try:
+                                parsed = json.loads(result)
+                                return parsed.get("masked_question", result)
+                            except Exception:
+                                # If parsing fails, return the raw result
+                                logger.warning("Failed to parse outlines result for question masking, returning raw result")
+                                return result
+                        except Exception as e:
+                            logger.error(f"Outlines question masking failed: {e}")
+                            # Fall back to standard generation approach
+                            response = self.llm_client.generate(prompt)
+                            masked_text = self._parse_masking_response(response, text_type)
+                            if masked_text and len(masked_text) > 0:
+                                return masked_text
+                            # If parsing failed, fall back to regex
+                            logger.info("Falling back to regex masking for question")
+                            return (
+                                mask_literals_regex(text)
+                                if text_type == "question"
+                                else mask_sql_regex(text)
+                            )
+                    else:
+                        # Fallback if models not available
+                        logger.warning("Question model not available, falling back to standard generation")
+                        response = self.llm_client.generate(prompt)
+                        masked_text = self._parse_masking_response(response, text_type)
+                        if masked_text and len(masked_text) > 0:
+                            return masked_text
+                        logger.info("Falling back to regex masking for question")
+                        return (
+                            mask_literals_regex(text)
+                            if text_type == "question"
+                            else mask_sql_regex(text)
+                        )
+                else:
+                    # Use cached SQL model
+                    if self.sql_model is not None:
+                        try:
+                            result = outlines_model(prompt_text, output_type=self.sql_model)
+                            # Outlines returns a JSON string, not a Pydantic object
+                            # Parse it to extract the masked text
+                            try:
+                                parsed = json.loads(result)
+                                return parsed.get("masked_text", result)
+                            except Exception:
+                                # If parsing fails, return the raw result
+                                logger.warning("Failed to parse outlines result for SQL masking, returning raw result")
+                                return result
+                        except Exception as e:
+                            logger.error(f"Outlines SQL masking failed: {e}")
+                            # Fall back to standard generation approach
+                            response = self.llm_client.generate(prompt)
+                            masked_text = self._parse_masking_response(response, text_type)
+                            if masked_text and len(masked_text) > 0:
+                                return masked_text
+                            # If parsing failed, fall back to regex
+                            logger.info("Falling back to regex masking for SQL")
+                            return (
+                                mask_literals_regex(text)
+                                if text_type == "question"
+                                else mask_sql_regex(text)
+                            )
+                    else:
+                        # Fallback if models not available
+                        logger.warning("SQL model not available, falling back to standard generation")
+                        response = self.llm_client.generate(prompt)
+                        masked_text = self._parse_masking_response(response, text_type)
+                        if masked_text and len(masked_text) > 0:
+                            return masked_text
+                        logger.info("Falling back to regex masking for SQL")
+                        return (
+                            mask_literals_regex(text)
+                            if text_type == "question"
+                            else mask_sql_regex(text)
+                        )
+            except Exception as e:
+                logger.error(f"Outlines masking failed: {e}, falling back to standard generation")
+                # Fall back to standard generation approach
+                response = self.llm_client.generate(prompt)
+                masked_text = self._parse_masking_response(response, text_type)
+                if masked_text and len(masked_text) > 0:
+                    return masked_text
+                # If parsing failed, fall back to regex
+                logger.info("Falling back to regex masking")
+                return (
+                    mask_literals_regex(text)
+                    if text_type == "question"
+                    else mask_sql_regex(text)
+                )
+
+                # Apply chat template
+                messages = [
+                    {
+                        "role": "system",
+                        "content": "You are an expert SQL developer. Output valid JSON only.",
+                    },
+                    {"role": "user", "content": prompt},
+                ]
+
+                if self.llm_client.tokenizer.chat_template is not None:
+                    prompt_text = self.llm_client.tokenizer.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True
+                    )
+                else:
+                    prompt_text = prompt
+
+                # Call the wrapped model directly with output_type parameter
+                if text_type == "question":
+                    # Use cached question model
+                    if self.question_model is not None:
+                        try:
                             result = outlines_model(
                                 prompt_text, output_type=self.question_model
                             )
