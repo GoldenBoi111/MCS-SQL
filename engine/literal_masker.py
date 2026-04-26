@@ -24,7 +24,7 @@ except ImportError:
     OUTLINES_AVAILABLE = False
     outlines = None
 
-from json_schemas import QUESTION_MASKING_SCHEMA, SQL_MASKING_SCHEMA
+from json_schemas import get_schema_for_task
 
 
 class LiteralMasker:
@@ -108,10 +108,10 @@ class LiteralMasker:
         """
         if text_type == "question":
             prompt = self._build_question_masking_prompt(text, schema, evidence)
-            json_schema = QUESTION_MASKING_SCHEMA
+            json_schema = get_schema_for_task("question_masking")
         else:
             prompt = self._build_sql_masking_prompt(text)
-            json_schema = SQL_MASKING_SCHEMA
+            json_schema = get_schema_for_task("sql_masking")
 
         # Try outlines if available
         if OUTLINES_AVAILABLE and self.llm_client:
@@ -148,10 +148,15 @@ class LiteralMasker:
 
                 # Call the wrapped model directly with output_type parameter
                 if text_type == "question":
+<<<<<<< HEAD
                     result = outlines_model(prompt_text, output_type=question_model)
                     return result.masked_question
                 else:
                     result = outlines_model(prompt_text, output_type=sql_model)
+=======
+                    return result.masked_question
+                else:
+>>>>>>> 86dac3f046686412c007492d784d6451e68ed03e
                     return result.masked_text
 
             except Exception as e:
