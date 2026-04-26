@@ -173,7 +173,7 @@ class LiteralMasker:
                             result = outlines_model(
                                 prompt_text, 
                                 output_type=self.question_model,
-                                max_new_tokens=2048, 
+                                max_new_tokens=4096, 
                                 temperature=0.1
                             )
                             # Always treat result as string - never assume Pydantic object
@@ -224,7 +224,7 @@ class LiteralMasker:
                             result = outlines_model(
                                 prompt_text, 
                                 output_type=self.sql_model,
-                                max_new_tokens=2048, 
+                                max_new_tokens=4096, 
                                 temperature=0.1
                             )
                             # Always treat result as string - never assume Pydantic object
