@@ -174,7 +174,7 @@ class LiteralMasker:
                                 prompt_text, 
                                 output_type=self.question_model,
                                 max_new_tokens=2048, 
-                                temperature=0.0
+                                temperature=0.1
                             )
                             # Always treat result as string - never assume Pydantic object
                             # Extract JSON by finding first { to last }
@@ -225,7 +225,7 @@ class LiteralMasker:
                                 prompt_text, 
                                 output_type=self.sql_model,
                                 max_new_tokens=2048, 
-                                temperature=0.0
+                                temperature=0.1
                             )
                             # Always treat result as string - never assume Pydantic object
                             # Extract JSON by finding first { to last }
