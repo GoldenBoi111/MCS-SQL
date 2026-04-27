@@ -18,6 +18,7 @@ import gc
 import json
 import logging
 import os
+
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import random
 import re
@@ -39,24 +40,30 @@ from training_dataset_indexer import TrainingDatasetIndexer
 from training_dataset_indexer_masked import MaskedTrainingDatasetIndexer
 from error_logger import ErrorLogger, MemoryManager, check_gpu_memory, clear_gpu_memory
 
+
 # Multi-GPU setup
 def setup_multi_gpu(num_gpus: int = 4):
     """Setup multi-GPU environment and return list of GPU IDs."""
     import torch
+
     available_gpus = torch.cuda.device_count()
     print(f"Available GPUs: {available_gpus}")
-    
+
     if available_gpus < num_gpus:
-        print(f"Warning: Requested {num_gpus} GPUs, but only {available_gpus} available")
+        print(
+            f"Warning: Requested {num_gpus} GPUs, but only {available_gpus} available"
+        )
         num_gpus = available_gpus
-    
+
     gpu_ids = list(range(num_gpus))
     print(f"Using GPUs: {gpu_ids}")
-    
+
     for i in gpu_ids:
         print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
-        print(f"    Memory: {torch.cuda.get_device_properties(i).total_memory / 1e9:.2f} GB")
-    
+        print(
+            f"    Memory: {torch.cuda.get_device_properties(i).total_memory / 1e9:.2f} GB"
+        )
+
     return gpu_ids
 
 
@@ -64,18 +71,20 @@ logger = logging.getLogger(__name__)
 
 
 def load_benchmark(json_path: str) -> List[Dict[str, Any]]:
-    with open(json_path, 'r', encoding='utf-8') as f:
+    with open(json_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def execute_sql_with_timeout(db_path: str, sql: str, timeout: int = 5) -> Tuple[bool, str, float]:
+def execute_sql_with_timeout(
+    db_path: str, sql: str, timeout: int = 5
+) -> Tuple[bool, str, float]:
     """Execute SQL and return (success, result_string_or_error, execution_time)."""
     import threading
-    
+
     start_time = time.time()
     result = {"success": False, "results": frozenset(), "error": None}
     conn = None
-    
+
     def execute_query():
         nonlocal conn
         try:
@@ -90,14 +99,14 @@ def execute_sql_with_timeout(db_path: str, sql: str, timeout: int = 5) -> Tuple[
             result["error"] = str(e)
             if conn:
                 conn.close()
-    
+
     # Run query in a thread
     thread = threading.Thread(target=execute_query)
     thread.start()
     thread.join(timeout=timeout)
-    
+
     exec_time = time.time() - start_time
-    
+
     # If thread is still alive, query timed out
     if thread.is_alive():
         # Interrupt the connection to cancel the query
@@ -108,7 +117,7 @@ def execute_sql_with_timeout(db_path: str, sql: str, timeout: int = 5) -> Tuple[
                 pass
         thread.join(timeout=1)  # Give it a moment to clean up
         return False, frozenset(), exec_time
-    
+
     # Query completed (success or error)
     if result["success"]:
         return True, result["results"], exec_time
@@ -120,15 +129,15 @@ def build_examples_text(examples: List[Dict[str, Any]]) -> str:
     """Format the retrieved examples for the prompt."""
     parts = ["<examples>"]
     for ex in examples:
-        q_text = ex.get('orig_question', ex.get('question', ''))
-        sql_text = ex.get('orig_sql', ex.get('sql', ''))
+        q_text = ex.get("orig_question", ex.get("question", ""))
+        sql_text = ex.get("orig_sql", ex.get("sql", ""))
         # Escape curly braces so they don't interfere with .format()
-        q_text = q_text.replace('{', '{{').replace('}', '}}')
-        sql_text = sql_text.replace('{', '{{').replace('}', '}}')
+        q_text = q_text.replace("{", "{{").replace("}", "}}")
+        sql_text = sql_text.replace("{", "{{").replace("}", "}}")
         parts.append(f"# Question: {q_text}")
         parts.append(f"# Gold SQL: {sql_text}")
-        if 'metadata' in ex and ex['metadata'].get('evidence'):
-            evidence = ex['metadata']['evidence'].replace('{', '{{').replace('}', '}}')
+        if "metadata" in ex and ex["metadata"].get("evidence"):
+            evidence = ex["metadata"]["evidence"].replace("{", "{{").replace("}", "}}")
             parts.append(f"# Evidence: {evidence}")
         parts.append("")
 
@@ -136,15 +145,17 @@ def build_examples_text(examples: List[Dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
-def get_sample_table_contents(db_path: str, tables: List[str], sample_size: int = 3) -> str:
+def get_sample_table_contents(
+    db_path: str, tables: List[str], sample_size: int = 3
+) -> str:
     """
     Get sample contents from each table in CSV format.
-    
+
     Args:
         db_path: Path to SQLite database
         tables: List of table names to sample
         sample_size: Number of rows to sample from each table
-        
+
     Returns:
         Formatted string with sample table contents
     """
@@ -167,7 +178,11 @@ def get_sample_table_contents(db_path: str, tables: List[str], sample_size: int 
                 parts.append(" | ".join(column_names))
                 parts.append("-" * 50)
                 for row in rows:
-                    parts.append(" | ".join(str(val) if val is not None else "NULL" for val in row))
+                    parts.append(
+                        " | ".join(
+                            str(val) if val is not None else "NULL" for val in row
+                        )
+                    )
                 parts.append("")
             except Exception as e:
                 parts.append(f"Table: {table} (Error sampling: {e})")
@@ -176,7 +191,7 @@ def get_sample_table_contents(db_path: str, tables: List[str], sample_size: int 
         conn.close()
     except Exception as e:
         parts.append(f"Error connecting to database: {e}")
-    
+
     return "\n".join(parts)
 
 
@@ -187,7 +202,7 @@ def run_benchmark(
     limit: int = None,
     gpu_id: int = None,
     questions_chunk: List[Dict] = None,
-    start_index: int = 0
+    start_index: int = 0,
 ):
     """
     Run benchmark on a single GPU or all GPUs.
@@ -202,7 +217,7 @@ def run_benchmark(
         start_index: Starting index of this chunk (for appending to existing results)
     """
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # Load existing results if they exist (for appending)
     results_file = os.path.join(output_dir, "benchmark_results.json")
     results_detail = []
@@ -210,7 +225,9 @@ def run_benchmark(
     if os.path.exists(results_file):
         with open(results_file, "r") as f:
             results_detail = json.load(f)
-        completed_qids = set(r.get("question_id") for r in results_detail if r.get("question_id"))
+        completed_qids = set(
+            r.get("question_id") for r in results_detail if r.get("question_id")
+        )
         print(f"Loaded {len(results_detail)} existing results from {results_file}")
         print(f"Completed question_ids: {sorted(completed_qids)}")
         print("Already-completed questions will be skipped")
@@ -276,9 +293,15 @@ def run_benchmark(
 
         print(f"✓ Model loaded successfully with outlines")
         if torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated(gpu_id if gpu_id is not None else 0) / 1e9
-            reserved = torch.cuda.memory_reserved(gpu_id if gpu_id is not None else 0) / 1e9
-            print(f"  GPU Memory after load: Allocated={allocated:.2f}GB, Reserved={reserved:.2f}GB")
+            allocated = (
+                torch.cuda.memory_allocated(gpu_id if gpu_id is not None else 0) / 1e9
+            )
+            reserved = (
+                torch.cuda.memory_reserved(gpu_id if gpu_id is not None else 0) / 1e9
+            )
+            print(
+                f"  GPU Memory after load: Allocated={allocated:.2f}GB, Reserved={reserved:.2f}GB"
+            )
 
     # Setup schema linker with the model
     linker = SchemaLinker(
@@ -292,24 +315,24 @@ def run_benchmark(
     print("Loading Standard Index...")
     standard_indexer = TrainingDatasetIndexer(
         embedding_model_name=config.EMBEDDING_MODEL_NAME,
-        index_type=config.FAISS_INDEX_TYPE
+        index_type=config.FAISS_INDEX_TYPE,
     )
     standard_indexer.load(config.FAISS_INDEX)
-    
+
     print("Loading Masked Index...")
     masked_indexer = MaskedTrainingDatasetIndexer(
         embedding_model_name=config.EMBEDDING_MODEL_NAME,
-        index_type=config.FAISS_INDEX_TYPE
+        index_type=config.FAISS_INDEX_TYPE,
     )
     masked_indexer.load(config.FAISS_INDEX_MASKED)
-    
+
     # Also need literal masker to mask queries prior to searching masked index
     literal_masker = LiteralMasker(llm_client=llm_client)
 
     # Load prompt templates
     with open(config.PROMPTS_DIR / "SQL_generation.txt", "r") as f:
         prompt_template = f.read()
-    
+
     with open(config.PROMPTS_DIR / "SQL_selection.txt", "r") as f:
         selection_template = f.read()
 
@@ -328,49 +351,54 @@ def run_benchmark(
         "simple": [],
         "moderate": [],
         "challenging": [],
-        "unknown": []
+        "unknown": [],
     }
-    
+
     for q_idx, q in enumerate(questions):
         # Calculate global question index for proper tracking
         global_q_idx = start_index + q_idx
-        
+
         db_id = q["db_id"]
         question = q["question"]
         evidence = q.get("evidence", "")
         ground_truth = q["SQL"]
         difficulty = q.get("difficulty", "unknown")
-        
+
         db_path = os.path.join(db_root, db_id, f"{db_id}.sqlite")
         print(f"\n[{global_q_idx+1}] Q: {question[:80]}...")
-        
+
         if not os.path.exists(db_path):
             print(f"  Warning: DB not found at {db_path}")
             continue
-            
+
         # 1. Schema Linking
         print("  Running Schema Linking...")
         t0 = time.time()
         full_schema = linker.load_schema(db_path)
-        
+
         # Check memory before schema linking
         is_low, free_gb, allocated_gb = check_gpu_memory(threshold_gb=8.0)
         if is_low:
-            print(f"  [WARNING] GPU memory low before schema linking: {free_gb:.2f}GB free")
+            print(
+                f"  [WARNING] GPU memory low before schema linking: {free_gb:.2f}GB free"
+            )
             clear_gpu_memory(verbose=True)
-        
+
         try:
             linking_res = linker.link_schema(full_schema, question, evidence)
         except RuntimeError as e:
             if "CUDA out of memory" in str(e):
                 print(f"\n[CUDA OOM] Schema linking failed...")
-                error_logger.log_cuda_error(e, {
-                    "phase": "SCHEMA_LINKING",
-                    "question_id": q_idx,
-                    "db_id": db_id,
-                })
+                error_logger.log_cuda_error(
+                    e,
+                    {
+                        "phase": "SCHEMA_LINKING",
+                        "question_id": q_idx,
+                        "db_id": db_id,
+                    },
+                )
                 # Continue with empty linking result
-                linking_res = type('obj', (object,), {'tables': [], 'columns': []})
+                linking_res = type("obj", (object,), {"tables": [], "columns": []})
             else:
                 raise
 
@@ -378,12 +406,14 @@ def run_benchmark(
         all_db_tables = set(full_schema.keys())
         original_tables = linking_res.tables
         linking_res.tables = [t for t in linking_res.tables if t in all_db_tables]
-        
+
         # Log if any tables were removed
         removed_tables = set(original_tables) - all_db_tables
         if removed_tables:
-            print(f"  [WARNING] Removed {len(removed_tables)} hallucinated table(s): {removed_tables}")
-        
+            print(
+                f"  [WARNING] Removed {len(removed_tables)} hallucinated table(s): {removed_tables}"
+            )
+
         # Filter columns: keep only columns from valid tables that exist in the schema
         valid_columns = []
         for col_entry in linking_res.columns:
@@ -398,50 +428,64 @@ def run_benchmark(
                     if col_entry in full_schema.get(table, []):
                         valid_columns.append(f"{table}.{col_entry}")
                         break
-        
+
         linking_res.columns = valid_columns
-        
+
         # Format the linked schema for the generator prompt
-        linked_schema_dict = {t: full_schema[t] for t in linking_res.tables if t in full_schema}
+        linked_schema_dict = {
+            t: full_schema[t] for t in linking_res.tables if t in full_schema
+        }
         schema_text = linker.format_schema_for_prompt(linked_schema_dict)
-        print(f"  Schema Linking took {time.time() - t0:.2f}s (Found {len(linking_res.tables)} tables, {len(linking_res.columns)} columns)")
-        
+        print(
+            f"  Schema Linking took {time.time() - t0:.2f}s (Found {len(linking_res.tables)} tables, {len(linking_res.columns)} columns)"
+        )
+
         # Cleanup large dictionary after building schema text
         del full_schema
         del linked_schema_dict
-        
+
         # 2. Retrieve Examples (k=20)
         print("  Retrieving examples from FAISS...")
         k = 20
         standard_results = standard_indexer.search(question, top_k=k)
-        
+
         masked_q = literal_masker.mask_question(question)
         masked_results = masked_indexer.search(masked_q, top_k=k)
-        
+
         # Format examples into dictionaries
         std_examples = [
             {"question": sq, "sql": sql, "metadata": meta}
             for (sq, sql, meta, score) in standard_results
         ]
-        
+
         msk_examples = [
-            {"question": mq, "sql": msql, "orig_question": oq, "orig_sql": osql, "metadata": meta}
+            {
+                "question": mq,
+                "sql": msql,
+                "orig_question": oq,
+                "orig_sql": osql,
+                "metadata": meta,
+            }
             for (mq, oq, msql, osql, meta, score) in masked_results
         ]
-        
+
         # Cleanup raw search results and masked question after processing
         del standard_results
         del masked_results
         del masked_q
-        
+
         # 3. Build 5 Prompt Variations
-        print(f"  Standard examples: {len(std_examples)}, Masked examples: {len(msk_examples)}")
+        print(
+            f"  Standard examples: {len(std_examples)}, Masked examples: {len(msk_examples)}"
+        )
         print(f"  std_examples[0]: {std_examples[0] if std_examples else 'None'}")
         print(f"  msk_examples[0]: {msk_examples[0] if msk_examples else 'None'}")
-        
+
         # 1 MASKED only
         prompt_variations = []
-        prompt_variations.append(("masked_only", msk_examples[:10])) # 10 examples per prompt
+        prompt_variations.append(
+            ("masked_only", msk_examples[:10])
+        )  # 10 examples per prompt
 
         # 1 STANDARD only
         prompt_variations.append(("standard_only", std_examples[:10]))
@@ -457,49 +501,52 @@ def run_benchmark(
                 mixed += random.sample(rem_pool, min(10 - len(mixed), len(rem_pool)))
             random.shuffle(mixed)
             prompt_variations.append((f"mixed_{i}", mixed))
-        
+
         # Cleanup examples after building prompt variations
         del std_examples
         del msk_examples
-        
+
         print(f"  Built {len(prompt_variations)} prompt variations")
         for pname, pex in prompt_variations:
             print(f"    {pname}: {len(pex)} examples")
-            
+
         # 4. Generate 100 Queries (5 prompts × 20 generations) using parallel batch generation
         print("  Generating SQL candidates (5 × 20 = 100 using parallel batch)...")
         generated_candidates = []
 
         # Get sample table contents for the linked schema
-        sample_contents = get_sample_table_contents(db_path, list(linking_res.tables), sample_size=3)
+        sample_contents = get_sample_table_contents(
+            db_path, list(linking_res.tables), sample_size=3
+        )
         print(f"  Sample table contents:\n{sample_contents[:500]}...")
 
         # Build all 100 prompts first (5 prompt types × 20 generations each)
         all_prompts = []
         prompt_metadata = []  # Track (prompt_type, gen_idx) for each prompt
-        
+
         for p_name, ex_list in prompt_variations:
             ex_text = build_examples_text(ex_list)
-            
+
             base_prompt = (
-                prompt_template
-                .replace("{examples}", ex_text)
+                prompt_template.replace("{examples}", ex_text)
                 .replace("{schema_text}", schema_text)
                 .replace("{sample_contents}", sample_contents)
                 .replace("{question}", question)
                 .replace("{evidence}", evidence)
             )
-            
+
             # Create config.MAJORITY_VOTE_N copies of this prompt (each will sample independently)
             for gen_idx in range(config.MAJORITY_VOTE_N):
                 all_prompts.append(base_prompt)
                 prompt_metadata.append((p_name, gen_idx))
-        
+
         # Cleanup prompt building intermediates
         del prompt_variations
-        if 'ex_text' in locals(): del ex_text
-        if 'base_prompt' in locals(): del base_prompt
-        
+        if "ex_text" in locals():
+            del ex_text
+        if "base_prompt" in locals():
+            del base_prompt
+
         print(f"  Built {len(all_prompts)} prompts for parallel generation...")
 
         # Generate all responses in parallel using model copies
@@ -523,24 +570,32 @@ def run_benchmark(
                 print(f"\n[CUDA OOM] Generation failed, attempting recovery...")
 
                 # Log the error
-                error_logger.log_cuda_error(e, {
-                    "phase": "SQL_GENERATION",
-                    "question_id": q_idx,
-                })
+                error_logger.log_cuda_error(
+                    e,
+                    {
+                        "phase": "SQL_GENERATION",
+                        "question_id": q_idx,
+                    },
+                )
 
                 # Retry with smaller batch
                 print("  Retrying with batch_size=2...")
                 try:
                     # Clear memory first
                     clear_gpu_memory(verbose=True)
-                    all_responses = llm_client.generate_batch(all_prompts, stop_sequences=None)
+                    all_responses = llm_client.generate_batch(
+                        all_prompts, stop_sequences=None
+                    )
                     print("  Recovery successful!")
                 except Exception as recovery_error:
                     print(f"  Recovery failed: {recovery_error}")
-                    error_logger.log_cuda_error(recovery_error, {
-                        "phase": "SQL_GENERATION_RECOVERY",
-                        "question_id": q_idx,
-                    })
+                    error_logger.log_cuda_error(
+                        recovery_error,
+                        {
+                            "phase": "SQL_GENERATION_RECOVERY",
+                            "question_id": q_idx,
+                        },
+                    )
                     all_responses = [""] * len(all_prompts)  # Empty responses
             else:
                 raise  # Re-raise non-OOM errors
@@ -549,7 +604,7 @@ def run_benchmark(
         del all_prompts
         gc.collect()
         torch.cuda.empty_cache()
-        
+
         # Parse responses and extract SQL
         print("  Parsing responses...")
         for i, response in enumerate(all_responses):
@@ -581,7 +636,7 @@ def run_benchmark(
                         if escape_next:
                             escape_next = False
                             continue
-                        if char == '\\' and in_string:
+                        if char == "\\" and in_string:
                             escape_next = True
                             continue
                         if char == '"' and not escape_next:
@@ -608,7 +663,9 @@ def run_benchmark(
                             if sql_query:
                                 print(f"      Parsed SQL: {sql_query[:100]}...")
                             else:
-                                print(f"      JSON parsed but no 'sql' field. Keys: {list(parsed.keys())}")
+                                print(
+                                    f"      JSON parsed but no 'sql' field. Keys: {list(parsed.keys())}"
+                                )
                                 print(f"      Full JSON: {json_str[:300]}...")
                         except json.JSONDecodeError as je:
                             print(f"      JSON parse error: {je}")
@@ -616,29 +673,34 @@ def run_benchmark(
                     else:
                         print(f"      No matching closing brace found")
                 else:
-                    print(f"      No '{{' found in response. First 200 chars: {response_stripped[:200]}...")
+                    print(
+                        f"      No '{{' found in response. First 200 chars: {response_stripped[:200]}..."
+                    )
 
                 if not sql_query:
                     # Method 2: Regex fallback for SQL
                     import re
-                    match = re.search(r'SELECT.*?(?:;|$)', response, re.IGNORECASE | re.DOTALL)
+
+                    match = re.search(
+                        r"SELECT.*?(?:;|$)", response, re.IGNORECASE | re.DOTALL
+                    )
                     if match:
                         sql_query = match.group(0).strip()
                         print(f"      Regex extracted SQL: {sql_query[:100]}...")
                     else:
-                        print(f"      Regex also failed. Response sample: {response[:150]}...")
+                        print(
+                            f"      Regex also failed. Response sample: {response[:150]}..."
+                        )
 
                 if sql_query:
-                    generated_candidates.append({
-                        "sql": sql_query,
-                        "prompt_type": p_name,
-                        "gen_idx": gen_idx
-                    })
+                    generated_candidates.append(
+                        {"sql": sql_query, "prompt_type": p_name, "gen_idx": gen_idx}
+                    )
                 else:
                     print(f"      No SQL extracted!")
             except Exception as e:
                 print(f"    Parse error: {e}")
-                    
+
         print(f"  Generated {len(generated_candidates)} valid SQL candidates")
 
         # Cleanup raw responses after extraction
@@ -657,22 +719,24 @@ def run_benchmark(
         print("  Executing candidates...")
         for cand in generated_candidates:
             sql = cand["sql"]
-            
+
             # Check cache first
             if sql in sql_to_result_cache:
                 success, res_val, exec_time = sql_to_result_cache[sql]
             else:
                 success, res_val, exec_time = execute_sql_with_timeout(db_path, sql)
                 sql_to_result_cache[sql] = (success, res_val, exec_time)
-            
+
             if success:
-                all_executions.append({
-                    "sql": sql,
-                    "result_str": res_val,
-                    "exec_time": exec_time,
-                    "prompt_type": cand["prompt_type"],
-                    "gen_idx": cand["gen_idx"]
-                })
+                all_executions.append(
+                    {
+                        "sql": sql,
+                        "result_str": res_val,
+                        "exec_time": exec_time,
+                        "prompt_type": cand["prompt_type"],
+                        "gen_idx": cand["gen_idx"],
+                    }
+                )
             else:
                 execution_errors += 1
 
@@ -681,7 +745,7 @@ def run_benchmark(
 
         if N_valid == 0:
             print("  No queries executed successfully. Saving failure result...")
-            
+
             # Save comprehensive failure result with all available info
             failure_result = {
                 "question_id": q.get("question_id", q_idx),
@@ -697,44 +761,51 @@ def run_benchmark(
                 "selection": {
                     "selected_sql": None,
                     "reasoning": None,
-                    "candidates_count": 0
+                    "candidates_count": 0,
                 },
                 "metrics": {
                     "generated": len(generated_candidates),
                     "execution_errors": execution_errors,
                     "valid_generations": 0,
-                    "unique_valid_sqls": 0
+                    "unique_valid_sqls": 0,
                 },
                 "failure_info": {
                     "phase": "EXECUTION",
                     "reason": "No queries executed successfully - all generated SQL had syntax errors or timeouts",
-                    "generated_candidates_sample": [
-                        {"sql": cand["sql"], "prompt_type": cand["prompt_type"]} 
-                        for cand in generated_candidates[:10]
-                    ] if generated_candidates else [],
-                    "error_count": execution_errors
-                }
+                    "generated_candidates_sample": (
+                        [
+                            {"sql": cand["sql"], "prompt_type": cand["prompt_type"]}
+                            for cand in generated_candidates[:10]
+                        ]
+                        if generated_candidates
+                        else []
+                    ),
+                    "error_count": execution_errors,
+                },
             }
-            
+
             results_detail.append(failure_result)
-            
+
             # Save intermediate results immediately on failure
             results_file = os.path.join(output_dir, "benchmark_results.json")
             with open(results_file, "w") as f:
                 json.dump(results_detail, f, indent=2)
             print(f"  Saved failure result to {results_file}")
-            
+
             # Track as incorrect for difficulty stats
             difficulty_results[difficulty].append(False)
-            
+
             # Continue to next question with memory cleanup
-            if 'generated_candidates' in locals(): del generated_candidates
-            if 'all_executions' in locals(): del all_executions
-            if 'sql_to_result_cache' in locals(): del sql_to_result_cache
+            if "generated_candidates" in locals():
+                del generated_candidates
+            if "all_executions" in locals():
+                del all_executions
+            if "sql_to_result_cache" in locals():
+                del sql_to_result_cache
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            
+
             continue
 
         # Group executions by result_set and track best (minimum) execution time per group
@@ -743,10 +814,9 @@ def run_benchmark(
             res_set = exec_item["result_str"]  # This is now a frozenset
             if res_set not in result_groups:
                 result_groups[res_set] = []
-            result_groups[res_set].append({
-                "sql": exec_item["sql"],
-                "exec_time": exec_item["exec_time"]
-            })
+            result_groups[res_set].append(
+                {"sql": exec_item["sql"], "exec_time": exec_item["exec_time"]}
+            )
 
         # Find best (minimum) execution time per group - this is the normalizer
         group_normalizers = {}  # result_frozenset -> best_exec_time
@@ -762,26 +832,36 @@ def run_benchmark(
             res_set = exec_item["result_str"]
             count_same_result = len(result_groups[res_set])
             confidence = count_same_result / N_valid
-            execution_confidences.append({
-                "sql": exec_item["sql"],
-                "result_str": res_set,
-                "confidence": confidence,
-                "exec_time": exec_item["exec_time"],
-                "normalized_by": group_normalizers[res_set]
-            })
+            execution_confidences.append(
+                {
+                    "sql": exec_item["sql"],
+                    "result_str": res_set,
+                    "confidence": confidence,
+                    "exec_time": exec_item["exec_time"],
+                    "normalized_by": group_normalizers[res_set],
+                }
+            )
 
         # Find the result group with highest confidence (most common result)
         result_counts = Counter(item["result_str"] for item in all_executions)
         most_common_result, top_count = result_counts.most_common(1)[0]
 
         # Find all unique SQLs that produced the winning result
-        winning_sqls = list(set(item["sql"] for item in all_executions if item["result_str"] == most_common_result))
+        winning_sqls = list(
+            set(
+                item["sql"]
+                for item in all_executions
+                if item["result_str"] == most_common_result
+            )
+        )
 
         # Pick the shortest winning SQL as the representative
         representative_sql = min(winning_sqls, key=len)
 
         # Execution evaluation against ground truth (for reference, not final verdict)
-        gt_success, gt_res_set, gt_time = execute_sql_with_timeout(db_path, ground_truth)
+        gt_success, gt_res_set, gt_time = execute_sql_with_timeout(
+            db_path, ground_truth
+        )
         winner_confidence = top_count / N_valid
 
         # Collect queries with confidence > 0.2, grouped by result with best speed as normalizer
@@ -792,28 +872,38 @@ def run_benchmark(
             if conf > 0.2 and res_set not in processed_results:
                 processed_results.add(res_set)
                 # Find all unique SQLs for this result group
-                group_sqls = list(set(item["sql"] for item in all_executions if item["result_str"] == res_set))
+                group_sqls = list(
+                    set(
+                        item["sql"]
+                        for item in all_executions
+                        if item["result_str"] == res_set
+                    )
+                )
                 # Pick representative (shortest SQL)
                 rep = min(group_sqls, key=len)
-                high_conf_sqls.append({
-                    "sql": rep,
-                    "confidence": conf,
-                    "count": count,
-                    "best_exec_time": group_normalizers[res_set],
-                    "all_sqls_in_group": group_sqls
-                })
+                high_conf_sqls.append(
+                    {
+                        "sql": rep,
+                        "confidence": conf,
+                        "count": count,
+                        "best_exec_time": group_normalizers[res_set],
+                        "all_sqls_in_group": group_sqls,
+                    }
+                )
 
         # Sort by confidence descending
         high_conf_sqls.sort(key=lambda x: x["confidence"], reverse=True)
 
         print("\n  Top 5 High-Confidence Queries:")
         for i, q_res in enumerate(high_conf_sqls[:5], 1):
-            print(f"    {i}. [Conf: {q_res['confidence']:.2f}, Time: {q_res['best_exec_time']:.3f}s] {q_res['sql'][:150]}...")
+            print(
+                f"    {i}. [Conf: {q_res['confidence']:.2f}, Time: {q_res['best_exec_time']:.3f}s] {q_res['sql'][:150]}..."
+            )
 
         # SQL Selection Phase: Use LLM to select the best SQL from all high-confidence candidates
         # Following the paper: present candidates as multiple-choice, sample n responses, majority vote
         # Use ALL candidates that pass the confidence threshold (> 0.2), not just top 3
-        high_conf_candidates = [c for c in high_conf_sqls if c['confidence'] > 0.2]
+        high_conf_candidates = [c for c in high_conf_sqls if c["confidence"] > 0.2]
 
         selected_sql = None
         selection_reasoning = None
@@ -822,7 +912,7 @@ def run_benchmark(
         # Skip selection stage if only one valid candidate - use it directly
         if len(high_conf_candidates) == 1:
             print("\n  Only one high-confidence candidate - skipping selection stage")
-            selected_sql = high_conf_candidates[0]['sql']
+            selected_sql = high_conf_candidates[0]["sql"]
             selection_reasoning = "Single candidate - no selection needed"
             representative_sql = selected_sql
         elif len(high_conf_candidates) > 1:
@@ -835,8 +925,7 @@ def run_benchmark(
             )
 
             selection_prompt = (
-                selection_template
-                .replace("{schema_text}", schema_text)
+                selection_template.replace("{schema_text}", schema_text)
                 .replace("{question}", question)
                 .replace("{evidence}", evidence)
                 .replace("{candidate_sqls}", candidate_sqls_text)
@@ -859,26 +948,36 @@ def run_benchmark(
 
             # Use llm_client.generate_batch for all models (outlines-based)
             try:
-                selection_responses = llm_client.generate_batch(selection_prompts, stop_sequences=None)
+                selection_responses = llm_client.generate_batch(
+                    selection_prompts, stop_sequences=None
+                )
             except RuntimeError as e:
                 if "CUDA out of memory" in str(e):
                     print(f"\n[CUDA OOM] Selection failed, attempting recovery...")
 
-                    error_logger.log_cuda_error(e, {
-                        "phase": "SQL_SELECTION",
-                        "question_id": q_idx,
-                    })
+                    error_logger.log_cuda_error(
+                        e,
+                        {
+                            "phase": "SQL_SELECTION",
+                            "question_id": q_idx,
+                        },
+                    )
 
                     # Retry with smaller batch
                     try:
                         clear_gpu_memory(verbose=True)
-                        selection_responses = llm_client.generate_batch(selection_prompts, stop_sequences=None)
+                        selection_responses = llm_client.generate_batch(
+                            selection_prompts, stop_sequences=None
+                        )
                         print("  Selection recovery successful!")
                     except Exception as recovery_error:
-                        error_logger.log_cuda_error(recovery_error, {
-                            "phase": "SQL_SELECTION_RECOVERY",
-                            "question_id": q_idx,
-                        })
+                        error_logger.log_cuda_error(
+                            recovery_error,
+                            {
+                                "phase": "SQL_SELECTION_RECOVERY",
+                                "question_id": q_idx,
+                            },
+                        )
                         selection_responses = [""] * len(selection_prompts)
                 else:
                     raise
@@ -903,11 +1002,13 @@ def run_benchmark(
                         in_string = False
                         escape_next = False
 
-                        for i, char in enumerate(selection_response[start_idx:], start_idx):
+                        for i, char in enumerate(
+                            selection_response[start_idx:], start_idx
+                        ):
                             if escape_next:
                                 escape_next = False
                                 continue
-                            if char == '\\' and in_string:
+                            if char == "\\" and in_string:
                                 escape_next = True
                                 continue
                             if char == '"' and not escape_next:
@@ -935,48 +1036,75 @@ def run_benchmark(
                             except json.JSONDecodeError as je:
                                 # Method 2: Regex fallback to extract SQL from broken JSON
                                 import re
+
                                 # Try to find "sql": "..." pattern, handling multiline
-                                sql_match = re.search(r'"sql"\s*:\s*"((?:[^"\\]|\\.)*)"', selection_response, re.DOTALL)
+                                sql_match = re.search(
+                                    r'"sql"\s*:\s*"((?:[^"\\]|\\.)*)"',
+                                    selection_response,
+                                    re.DOTALL,
+                                )
                                 if sql_match:
                                     sql = sql_match.group(1)
                                     # Unescape JSON string
-                                    sql = sql.replace('\\"', '"').replace('\\n', '\n').replace('\\\\', '\\')
-                                reasoning_match = re.search(r'"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"', selection_response, re.DOTALL)
+                                    sql = (
+                                        sql.replace('\\"', '"')
+                                        .replace("\\n", "\n")
+                                        .replace("\\\\", "\\")
+                                    )
+                                reasoning_match = re.search(
+                                    r'"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)"',
+                                    selection_response,
+                                    re.DOTALL,
+                                )
                                 if reasoning_match:
-                                    reasoning = reasoning_match.group(1).replace('\\"', '"')
+                                    reasoning = reasoning_match.group(1).replace(
+                                        '\\"', '"'
+                                    )
 
                                 if sql:
-                                    print(f"      Sample {sel_idx+1}: Extracted via regex")
+                                    print(
+                                        f"      Sample {sel_idx+1}: Extracted via regex"
+                                    )
                                 else:
-                                    print(f"      Sample {sel_idx+1}: Could not extract SQL")
+                                    print(
+                                        f"      Sample {sel_idx+1}: Could not extract SQL"
+                                    )
                         else:
                             print(f"      Sample {sel_idx+1}: No matching braces")
                     else:
                         print(f"      Sample {sel_idx+1}: No JSON found")
 
                     if sql:
-                        selection_votes.append({"sql": sql, "reasoning": reasoning or ""})
+                        selection_votes.append(
+                            {"sql": sql, "reasoning": reasoning or ""}
+                        )
                         print(f"      Sample {sel_idx+1}: {sql[:80]}...")
                 except Exception as e:
                     print(f"      Sample {sel_idx+1} error: {e}")
-            
+
             # Majority voting on selection
             if selection_votes:
                 sql_counts = Counter(vote["sql"] for vote in selection_votes)
                 most_common_sql, vote_count = sql_counts.most_common(1)[0]
-                
+
                 # Get reasoning from the vote that selected this SQL
                 selected_reasoning = next(
-                    (vote["reasoning"] for vote in selection_votes if vote["sql"] == most_common_sql),
-                    ""
+                    (
+                        vote["reasoning"]
+                        for vote in selection_votes
+                        if vote["sql"] == most_common_sql
+                    ),
+                    "",
                 )
-                
+
                 selected_sql = most_common_sql
                 selection_reasoning = selected_reasoning
-                
-                print(f"    Majority vote: {selected_sql[:150]}... ({vote_count}/{len(selection_votes)} votes)")
+
+                print(
+                    f"    Majority vote: {selected_sql[:150]}... ({vote_count}/{len(selection_votes)} votes)"
+                )
                 representative_sql = selected_sql
-                
+
                 # Cleanup selection data after majority voting
                 del selection_votes
                 del selection_responses
@@ -987,46 +1115,68 @@ def run_benchmark(
 
         # Re-evaluate correctness with the selected SQL using official BIRD EX metric
         if selected_sql:
-            selected_success, selected_res_set, _ = execute_sql_with_timeout(db_path, selected_sql)
+            selected_success, selected_res_set, _ = execute_sql_with_timeout(
+                db_path, selected_sql
+            )
             # Official BIRD EX: compare sets (order-independent)
-            is_correct = (gt_success and selected_success and selected_res_set == gt_res_set)
-            print(f"    Selected SQL correctness: {'CORRECT' if is_correct else 'INCORRECT'}")
+            is_correct = (
+                gt_success and selected_success and selected_res_set == gt_res_set
+            )
+            print(
+                f"    Selected SQL correctness: {'CORRECT' if is_correct else 'INCORRECT'}"
+            )
         else:
             # No selection was made, report on majority vote result
-            majority_success, majority_res_set, _ = execute_sql_with_timeout(db_path, representative_sql)
-            is_correct = (gt_success and majority_success and majority_res_set == gt_res_set)
-            print(f"\n  Majority Vote Result: {'CORRECT' if is_correct else 'INCORRECT'}")
+            majority_success, majority_res_set, _ = execute_sql_with_timeout(
+                db_path, representative_sql
+            )
+            is_correct = (
+                gt_success and majority_success and majority_res_set == gt_res_set
+            )
+            print(
+                f"\n  Majority Vote Result: {'CORRECT' if is_correct else 'INCORRECT'}"
+            )
             print(f"    Confidence: {winner_confidence:.2f} ({top_count}/{N_valid})")
 
         # Track results by difficulty
         difficulty_results[difficulty].append(is_correct)
-        
-        # Collect execution times for this question
-        execution_times = [item["exec_time"] for item in all_executions if "exec_time" in item]
 
-        results_detail.append({
-            "question_id": q.get("question_id", q_idx),
-            "question": question,
-            "db_id": db_id,
-            "difficulty": difficulty,
-            "ground_truth": ground_truth,
-            "winner_sql": representative_sql,
-            "is_correct": is_correct,
-            "winner_confidence": winner_confidence,
-            "execution_times": execution_times,
-            "high_confidence_alternatives": high_conf_sqls,
-            "selection": {
-                "selected_sql": selected_sql if len(high_conf_candidates) > 0 else None,
-                "reasoning": selection_reasoning if len(high_conf_candidates) > 0 else None,
-                "candidates_count": len(high_conf_candidates)
-            },
-            "metrics": {
-                "generated": len(generated_candidates),
-                "execution_errors": execution_errors,
-                "valid_generations": N_valid,
-                "unique_valid_sqls": len(set(item["sql"] for item in all_executions))
+        # Collect execution times for this question
+        execution_times = [
+            item["exec_time"] for item in all_executions if "exec_time" in item
+        ]
+
+        results_detail.append(
+            {
+                "question_id": q.get("question_id", q_idx),
+                "question": question,
+                "db_id": db_id,
+                "difficulty": difficulty,
+                "ground_truth": ground_truth,
+                "winner_sql": representative_sql,
+                "is_correct": is_correct,
+                "winner_confidence": winner_confidence,
+                "execution_times": execution_times,
+                "high_confidence_alternatives": high_conf_sqls,
+                "selection": {
+                    "selected_sql": (
+                        selected_sql if len(high_conf_candidates) > 0 else None
+                    ),
+                    "reasoning": (
+                        selection_reasoning if len(high_conf_candidates) > 0 else None
+                    ),
+                    "candidates_count": len(high_conf_candidates),
+                },
+                "metrics": {
+                    "generated": len(generated_candidates),
+                    "execution_errors": execution_errors,
+                    "valid_generations": N_valid,
+                    "unique_valid_sqls": len(
+                        set(item["sql"] for item in all_executions)
+                    ),
+                },
             }
-        })
+        )
 
         # Save intermediate
         with open(os.path.join(output_dir, "benchmark_results.json"), "w") as f:
@@ -1037,55 +1187,103 @@ def run_benchmark(
 
         # Delete large intermediate variables that are no longer needed
         # Note: Don't delete schema_text, question, evidence - used in selection phase
-        if 'generated_candidates' in locals(): del generated_candidates
-        if 'all_executions' in locals(): del all_executions
-        if 'sql_to_result_cache' in locals(): del sql_to_result_cache
-        if 'std_examples' in locals(): del std_examples
-        if 'msk_examples' in locals(): del msk_examples
-        if 'prompt_variations' in locals(): del prompt_variations
-        if 'linking_res' in locals(): del linking_res
-        if 'full_schema' in locals(): del full_schema
-        if 'sample_contents' in locals(): del sample_contents
-        if 'all_prompts' in locals(): del all_prompts
-        if 'all_responses' in locals(): del all_responses
-        if 'selection_prompts' in locals(): del selection_prompts
-        if 'selection_responses' in locals(): del selection_responses
+        if "generated_candidates" in locals():
+            del generated_candidates
+        if "all_executions" in locals():
+            del all_executions
+        if "sql_to_result_cache" in locals():
+            del sql_to_result_cache
+        if "std_examples" in locals():
+            del std_examples
+        if "msk_examples" in locals():
+            del msk_examples
+        if "prompt_variations" in locals():
+            del prompt_variations
+        if "linking_res" in locals():
+            del linking_res
+        if "full_schema" in locals():
+            del full_schema
+        if "sample_contents" in locals():
+            del sample_contents
+        if "all_prompts" in locals():
+            del all_prompts
+        if "all_responses" in locals():
+            del all_responses
+        if "selection_prompts" in locals():
+            del selection_prompts
+        if "selection_responses" in locals():
+            del selection_responses
         # Now safe to delete these (selection phase is complete)
-        if 'schema_text' in locals(): del schema_text
-        if 'question' in locals(): del question
-        if 'evidence' in locals(): del evidence
-        if 'representative_sql' in locals(): del representative_sql
-        if 'selection_reasoning' in locals(): del selection_reasoning
-        if 'high_conf_sqls' in locals(): del high_conf_sqls
-        if 'high_conf_candidates' in locals(): del high_conf_candidates
-        if 'result_groups' in locals(): del result_groups
-        if 'group_normalizers' in locals(): del group_normalizers
-        if 'execution_confidences' in locals(): del execution_confidences
-        if 'winning_sqls' in locals(): del winning_sqls
-        if 'result_counts' in locals(): del result_counts
-        if 'most_common_result' in locals(): del most_common_result
-        if 'top_count' in locals(): del top_count
-        if 'most_common_sql' in locals(): del most_common_sql
-        if 'vote_count' in locals(): del vote_count
-        if 'selected_sql' in locals(): del selected_sql
-        if 'selected_success' in locals(): del selected_success
-        if 'selected_res_set' in locals(): del selected_res_set
-        if 'majority_success' in locals(): del majority_success
-        if 'majority_res_set' in locals(): del majority_res_set
-        if 'gt_success' in locals(): del gt_success
-        if 'gt_res_set' in locals(): del gt_res_set
-        if 'gt_time' in locals(): del gt_time
-        if 'winner_confidence' in locals(): del winner_confidence
-        if 'processed_results' in locals(): del processed_results
-        if 'candidate_sqls_text' in locals(): del candidate_sqls_text
-        if 'selection_prompt' in locals(): del selection_prompt
-        if 'selection_votes' in locals(): del selection_votes
-        if 'sql_counts' in locals(): del sql_counts
-        if 'selected_reasoning' in locals(): del selected_reasoning
-        if 'is_correct' in locals(): del is_correct
-        if 'execution_times' in locals(): del execution_times
-        if 'ex_text' in locals(): del ex_text
-        if 'base_prompt' in locals(): del base_prompt
+        if "schema_text" in locals():
+            del schema_text
+        if "question" in locals():
+            del question
+        if "evidence" in locals():
+            del evidence
+        if "representative_sql" in locals():
+            del representative_sql
+        if "selection_reasoning" in locals():
+            del selection_reasoning
+        if "high_conf_sqls" in locals():
+            del high_conf_sqls
+        if "high_conf_candidates" in locals():
+            del high_conf_candidates
+        if "result_groups" in locals():
+            del result_groups
+        if "group_normalizers" in locals():
+            del group_normalizers
+        if "execution_confidences" in locals():
+            del execution_confidences
+        if "winning_sqls" in locals():
+            del winning_sqls
+        if "result_counts" in locals():
+            del result_counts
+        if "most_common_result" in locals():
+            del most_common_result
+        if "top_count" in locals():
+            del top_count
+        if "most_common_sql" in locals():
+            del most_common_sql
+        if "vote_count" in locals():
+            del vote_count
+        if "selected_sql" in locals():
+            del selected_sql
+        if "selected_success" in locals():
+            del selected_success
+        if "selected_res_set" in locals():
+            del selected_res_set
+        if "majority_success" in locals():
+            del majority_success
+        if "majority_res_set" in locals():
+            del majority_res_set
+        if "gt_success" in locals():
+            del gt_success
+        if "gt_res_set" in locals():
+            del gt_res_set
+        if "gt_time" in locals():
+            del gt_time
+        if "winner_confidence" in locals():
+            del winner_confidence
+        if "processed_results" in locals():
+            del processed_results
+        if "candidate_sqls_text" in locals():
+            del candidate_sqls_text
+        if "selection_prompt" in locals():
+            del selection_prompt
+        if "selection_votes" in locals():
+            del selection_votes
+        if "sql_counts" in locals():
+            del sql_counts
+        if "selected_reasoning" in locals():
+            del selected_reasoning
+        if "is_correct" in locals():
+            del is_correct
+        if "execution_times" in locals():
+            del execution_times
+        if "ex_text" in locals():
+            del ex_text
+        if "base_prompt" in locals():
+            del base_prompt
 
         # Force Python garbage collection
         gc.collect()
@@ -1098,8 +1296,10 @@ def run_benchmark(
         if torch.cuda.is_available():
             allocated = torch.cuda.memory_allocated() / 1e9
             reserved = torch.cuda.memory_reserved() / 1e9
-            print(f"  [Memory Cleanup] GPU {gpu_id}: Allocated={allocated:.2f}GB, Reserved={reserved:.2f}GB")
-            
+            print(
+                f"  [Memory Cleanup] GPU {gpu_id}: Allocated={allocated:.2f}GB, Reserved={reserved:.2f}GB"
+            )
+
             # Check if memory is still high and log warning
             if allocated > 60.0:  # More than 60GB allocated
                 print(f"  [WARNING] High memory usage detected!")
@@ -1110,7 +1310,7 @@ def run_benchmark(
                         "question_id": q_idx,
                         "allocated_gb": allocated,
                         "reserved_gb": reserved,
-                    }
+                    },
                 )
         # ===========================================================
 
@@ -1118,18 +1318,27 @@ def run_benchmark(
     print("\nPerforming final cleanup of persistent resources...")
 
     # Delete primary controllers
-    if 'linker' in locals(): del linker
-    if 'standard_indexer' in locals(): del standard_indexer
-    if 'masked_indexer' in locals(): del masked_indexer
-    if 'literal_masker' in locals(): del literal_masker
-    if 'llm_client' in locals(): del llm_client
-    if 'error_logger' in locals(): del error_logger
-    if 'memory_manager' in locals(): del memory_manager
+    if "linker" in locals():
+        del linker
+    if "standard_indexer" in locals():
+        del standard_indexer
+    if "masked_indexer" in locals():
+        del masked_indexer
+    if "literal_masker" in locals():
+        del literal_masker
+    if "llm_client" in locals():
+        del llm_client
+    if "error_logger" in locals():
+        del error_logger
+    if "memory_manager" in locals():
+        del memory_manager
 
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        print(f"Final memory status: Allocated={torch.cuda.memory_allocated()/1e9:.2f}GB, Reserved={torch.cuda.memory_reserved()/1e9:.2f}GB")
+        print(
+            f"Final memory status: Allocated={torch.cuda.memory_allocated()/1e9:.2f}GB, Reserved={torch.cuda.memory_reserved()/1e9:.2f}GB"
+        )
 
     # Generate detailed report
     generate_detailed_report(results_detail, output_dir)
@@ -1138,73 +1347,91 @@ def run_benchmark(
 def generate_detailed_report(results: List[Dict], output_dir: str):
     """
     Generate comprehensive benchmark report with detailed statistics.
-    
+
     Args:
         results: List of result dictionaries from all questions
         output_dir: Directory to save report
     """
     import statistics
-    
-    print("\n" + "="*100)
+
+    print("\n" + "=" * 100)
     print(" " * 30 + "DETAILED BENCHMARK REPORT")
-    print("="*100)
-    
+    print("=" * 100)
+
     # Overall Statistics
     total = len(results)
     correct = sum(1 for r in results if r.get("is_correct", False))
     overall_acc = (correct / total * 100) if total > 0 else 0
-    
+
     print(f"\n📊 OVERALL STATISTICS")
-    print("-"*100)
+    print("-" * 100)
     print(f"  Total Questions:     {total}")
     print(f"  Correct:             {correct} ({overall_acc:.2f}%)")
     print(f"  Incorrect:           {total - correct} ({100 - overall_acc:.2f}%)")
-    
+
     # Execution Time Statistics
     all_exec_times = []
     for r in results:
         if "execution_times" in r:
             all_exec_times.extend(r["execution_times"])
-    
+
     if all_exec_times:
         print(f"\nEXECUTION TIME STATISTICS (All SQL Queries)")
-        print("-"*100)
+        print("-" * 100)
         print(f"  Total Queries Executed:  {len(all_exec_times)}")
-        print(f"  Mean Execution Time:     {statistics.mean(all_exec_times)*1000:.2f} ms")
-        print(f"  Median Execution Time:   {statistics.median(all_exec_times)*1000:.2f} ms")
-        print(f"  Std Dev:                 {statistics.stdev(all_exec_times)*1000:.2f} ms" if len(all_exec_times) > 1 else "  Std Dev: N/A")
+        print(
+            f"  Mean Execution Time:     {statistics.mean(all_exec_times)*1000:.2f} ms"
+        )
+        print(
+            f"  Median Execution Time:   {statistics.median(all_exec_times)*1000:.2f} ms"
+        )
+        print(
+            f"  Std Dev:                 {statistics.stdev(all_exec_times)*1000:.2f} ms"
+            if len(all_exec_times) > 1
+            else "  Std Dev: N/A"
+        )
         print(f"  Min Execution Time:      {min(all_exec_times)*1000:.2f} ms")
         print(f"  Max Execution Time:      {max(all_exec_times)*1000:.2f} ms")
-    
+
     # Generation Statistics
     total_generated = sum(r.get("metrics", {}).get("generated", 0) for r in results)
     total_valid = sum(r.get("metrics", {}).get("valid_generations", 0) for r in results)
     total_errors = sum(r.get("metrics", {}).get("execution_errors", 0) for r in results)
     unique_sqls = sum(r.get("metrics", {}).get("unique_valid_sqls", 0) for r in results)
-    
+
     print(f"\n🔧 GENERATION STATISTICS")
-    print("-"*100)
+    print("-" * 100)
     print(f"  Total SQL Generated:     {total_generated}")
     if total_generated > 0:
-        print(f"  Valid Executions:        {total_valid} ({total_valid/total_generated*100:.1f}% success rate)")
-        print(f"  Execution Errors:        {total_errors} ({total_errors/total_generated*100:.1f}%)")
-        print(f"  Unique SQL Variations:   {unique_sqls} (avg {unique_sqls/total:.1f} per question)")
+        print(
+            f"  Valid Executions:        {total_valid} ({total_valid/total_generated*100:.1f}% success rate)"
+        )
+        print(
+            f"  Execution Errors:        {total_errors} ({total_errors/total_generated*100:.1f}%)"
+        )
+        print(
+            f"  Unique SQL Variations:   {unique_sqls} (avg {unique_sqls/total:.1f} per question)"
+        )
     else:
         print(f"  No SQL generated (check for errors)")
-    
+
     # Confidence Statistics
     confidences = [r.get("winner_confidence", 0) for r in results]
     if confidences:
         print(f"\n📈 CONFIDENCE STATISTICS (Majority Voting)")
-        print("-"*100)
+        print("-" * 100)
         print(f"  Mean Confidence:         {statistics.mean(confidences):.3f}")
         print(f"  Median Confidence:       {statistics.median(confidences):.3f}")
-        print(f"  High Confidence (>0.5):  {sum(1 for c in confidences if c > 0.5)} ({sum(1 for c in confidences if c > 0.5)/len(confidences)*100:.1f}%)")
-        print(f"  Low Confidence (<0.2):   {sum(1 for c in confidences if c < 0.2)} ({sum(1 for c in confidences if c < 0.2)/len(confidences)*100:.1f}%)")
-    
+        print(
+            f"  High Confidence (>0.5):  {sum(1 for c in confidences if c > 0.5)} ({sum(1 for c in confidences if c > 0.5)/len(confidences)*100:.1f}%)"
+        )
+        print(
+            f"  Low Confidence (<0.2):   {sum(1 for c in confidences if c < 0.2)} ({sum(1 for c in confidences if c < 0.2)/len(confidences)*100:.1f}%)"
+        )
+
     # Difficulty Breakdown
     print(f"\n📚 ACCURACY BY DIFFICULTY")
-    print("-"*100)
+    print("-" * 100)
     difficulty_stats = {}
     for diff in ["simple", "moderate", "challenging", "unknown"]:
         diff_results = [r for r in results if r.get("difficulty") == diff]
@@ -1215,13 +1442,15 @@ def generate_detailed_report(results: List[Dict], output_dir: str):
             difficulty_stats[diff] = {
                 "correct": diff_correct,
                 "total": diff_total,
-                "accuracy": diff_acc
+                "accuracy": diff_acc,
             }
-            print(f"  {diff.capitalize():<15} {diff_correct:>3}/{diff_total:<3} ({diff_acc:>6.2f}%)")
-    
+            print(
+                f"  {diff.capitalize():<15} {diff_correct:>3}/{diff_total:<3} ({diff_acc:>6.2f}%)"
+            )
+
     # Per-Database Breakdown
     print(f"\n🗄️  ACCURACY BY DATABASE")
-    print("-"*100)
+    print("-" * 100)
     db_stats = {}
     db_results = {}
     for r in results:
@@ -1229,7 +1458,7 @@ def generate_detailed_report(results: List[Dict], output_dir: str):
         if db_id not in db_results:
             db_results[db_id] = []
         db_results[db_id].append(r)
-    
+
     # Sort databases by accuracy (descending)
     db_accuracy = []
     for db_id, db_qs in db_results.items():
@@ -1237,81 +1466,99 @@ def generate_detailed_report(results: List[Dict], output_dir: str):
         db_total = len(db_qs)
         db_acc = (db_correct / db_total * 100) if db_total > 0 else 0
         db_accuracy.append((db_id, db_acc, db_correct, db_total))
-    
+
     db_accuracy.sort(key=lambda x: x[1], reverse=True)
-    
+
     print(f"  {'Database':<40} {'Correct':>10} {'Total':>8} {'Accuracy':>10}")
-    print("  " + "-"*70)
+    print("  " + "-" * 70)
     for db_id, acc, correct_count, total_count in db_accuracy:
-        db_name = db_id.split('/')[-1] if '/' in db_id else db_id
+        db_name = db_id.split("/")[-1] if "/" in db_id else db_id
         print(f"  {db_name:<40} {correct_count:>10} {total_count:>8} {acc:>9.2f}%")
-    
+
     # Per-Database Difficulty Breakdown
     print(f"\n🗄️  PER-DATABASE BREAKDOWN BY DIFFICULTY")
-    print("-"*100)
-    
+    print("-" * 100)
+
     for db_id, db_qs in db_results.items():
-        db_name = db_id.split('/')[-1] if '/' in db_id else db_id
+        db_name = db_id.split("/")[-1] if "/" in db_id else db_id
         print(f"\n  📁 {db_name} ({len(db_qs)} questions)")
-        print("  " + "-"*70)
-        print(f"    {'Difficulty':<15} {'Correct':>10} {'Total':>8} {'Accuracy':>10} {'Avg Exec Time':>15}")
-        print("    " + "-"*70)
-        
+        print("  " + "-" * 70)
+        print(
+            f"    {'Difficulty':<15} {'Correct':>10} {'Total':>8} {'Accuracy':>10} {'Avg Exec Time':>15}"
+        )
+        print("    " + "-" * 70)
+
         for diff in ["simple", "moderate", "challenging", "unknown"]:
             diff_qs = [r for r in db_qs if r.get("difficulty") == diff]
             if diff_qs:
                 diff_correct = sum(1 for r in diff_qs if r.get("is_correct", False))
                 diff_total = len(diff_qs)
                 diff_acc = (diff_correct / diff_total * 100) if diff_total > 0 else 0
-                
+
                 # Average execution time for this difficulty
                 diff_exec_times = []
                 for r in diff_qs:
                     if "execution_times" in r:
                         diff_exec_times.extend(r["execution_times"])
-                avg_exec = statistics.mean(diff_exec_times)*1000 if diff_exec_times else 0
-                
-                print(f"    {diff.capitalize():<15} {diff_correct:>10} {diff_total:>8} {diff_acc:>9.2f}% {avg_exec:>12.2f} ms")
-    
+                avg_exec = (
+                    statistics.mean(diff_exec_times) * 1000 if diff_exec_times else 0
+                )
+
+                print(
+                    f"    {diff.capitalize():<15} {diff_correct:>10} {diff_total:>8} {diff_acc:>9.2f}% {avg_exec:>12.2f} ms"
+                )
+
     # Selection Phase Statistics
-    selection_made = sum(1 for r in results if r.get("selection", {}).get("selected_sql") is not None)
+    selection_made = sum(
+        1 for r in results if r.get("selection", {}).get("selected_sql") is not None
+    )
     print(f"\n🎯 SQL SELECTION PHASE STATISTICS")
-    print("-"*100)
+    print("-" * 100)
     if total > 0:
-        print(f"  Selection Made:          {selection_made} ({selection_made/total*100:.1f}%)")
-        print(f"  Majority Vote Used:      {total - selection_made} ({(total - selection_made)/total*100:.1f}%)")
+        print(
+            f"  Selection Made:          {selection_made} ({selection_made/total*100:.1f}%)"
+        )
+        print(
+            f"  Majority Vote Used:      {total - selection_made} ({(total - selection_made)/total*100:.1f}%)"
+        )
     else:
         print(f"  No results to report")
-    
+
     # Save detailed report to file
     report_data = {
-        "overall": {
-            "total": total,
-            "correct": correct,
-            "accuracy": overall_acc
-        },
+        "overall": {"total": total, "correct": correct, "accuracy": overall_acc},
         "by_difficulty": difficulty_stats,
         "by_database": {},
         "execution_times": {
-            "mean_ms": statistics.mean(all_exec_times)*1000 if all_exec_times else 0,
-            "median_ms": statistics.median(all_exec_times)*1000 if all_exec_times else 0,
-            "min_ms": min(all_exec_times)*1000 if all_exec_times else 0,
-            "max_ms": max(all_exec_times)*1000 if all_exec_times else 0,
-            "std_ms": statistics.stdev(all_exec_times)*1000 if len(all_exec_times) > 1 else 0
+            "mean_ms": statistics.mean(all_exec_times) * 1000 if all_exec_times else 0,
+            "median_ms": (
+                statistics.median(all_exec_times) * 1000 if all_exec_times else 0
+            ),
+            "min_ms": min(all_exec_times) * 1000 if all_exec_times else 0,
+            "max_ms": max(all_exec_times) * 1000 if all_exec_times else 0,
+            "std_ms": (
+                statistics.stdev(all_exec_times) * 1000
+                if len(all_exec_times) > 1
+                else 0
+            ),
         },
         "generation": {
             "total_generated": total_generated,
             "valid_executions": total_valid,
             "errors": total_errors,
-            "unique_sqls": unique_sqls
+            "unique_sqls": unique_sqls,
         },
         "confidence": {
             "mean": statistics.mean(confidences) if confidences else 0,
             "median": statistics.median(confidences) if confidences else 0,
-            "high_confidence_ratio": sum(1 for c in confidences if c > 0.5)/len(confidences) if confidences else 0
-        }
+            "high_confidence_ratio": (
+                sum(1 for c in confidences if c > 0.5) / len(confidences)
+                if confidences
+                else 0
+            ),
+        },
     }
-    
+
     # Add per-database stats
     for db_id, db_qs in db_results.items():
         db_correct = sum(1 for r in db_qs if r.get("is_correct", False))
@@ -1320,20 +1567,21 @@ def generate_detailed_report(results: List[Dict], output_dir: str):
         report_data["by_database"][db_id] = {
             "total": db_total,
             "correct": db_correct,
-            "accuracy": db_acc
+            "accuracy": db_acc,
         }
-    
+
     report_file = os.path.join(output_dir, "detailed_report.json")
     with open(report_file, "w") as f:
         json.dump(report_data, f, indent=2)
-    
+
     print(f"\n💾 Detailed report saved to: {report_file}")
-    print("="*100)
+    print("=" * 100)
 
 
 # =============================================================================
 # Multi-GPU Worker Function (must be at module level for pickling)
 # =============================================================================
+
 
 def run_benchmark_single_gpu(
     benchmark_path: str,
@@ -1341,11 +1589,11 @@ def run_benchmark_single_gpu(
     output_dir: str,
     start: int = None,
     end: int = None,
-    gpu_id: int = None
+    gpu_id: int = None,
 ):
     """
     Run benchmark on a single GPU with start/end index support.
-    
+
     Args:
         benchmark_path: Path to benchmark JSON file
         db_root: Path to database root directory
@@ -1357,17 +1605,19 @@ def run_benchmark_single_gpu(
     # Load all questions
     questions = load_benchmark(benchmark_path)
     total_questions = len(questions)
-    
+
     # Apply start/end indices
     if start and start > 0:
         print(f"Starting from question index {start}...")
         questions = questions[start:]
     if end and end > 0:
         print(f"Limiting to question index {end} (exclusive)...")
-        questions = questions[:end - (start if start else 0)]
-    
-    print(f"Processing {len(questions)} questions (from index {start or 0} to {end or total_questions})")
-    
+        questions = questions[: end - (start if start else 0)]
+
+    print(
+        f"Processing {len(questions)} questions (from index {start or 0} to {end or total_questions})"
+    )
+
     # Build output subdirectory from start/end
     if start or end:
         subdir_parts = []
@@ -1376,11 +1626,13 @@ def run_benchmark_single_gpu(
         if end and end > 0:
             subdir_parts.append(f"end_{end}")
         output_dir = os.path.join(output_dir, "_".join(subdir_parts))
-    
+
     # Set GPU ID for output directory
-    gpu_output_dir = os.path.join(output_dir, f"gpu_{gpu_id if gpu_id is not None else 0}")
+    gpu_output_dir = os.path.join(
+        output_dir, f"gpu_{gpu_id if gpu_id is not None else 0}"
+    )
     os.makedirs(gpu_output_dir, exist_ok=True)
-    
+
     # Run benchmark
     run_benchmark(
         benchmark_path=benchmark_path,
@@ -1389,11 +1641,13 @@ def run_benchmark_single_gpu(
         limit=None,
         gpu_id=gpu_id,
         questions_chunk=questions,
-        start_index=start if start else 0
+        start_index=start if start else 0,
     )
 
 
-def gpu_worker(gpu_id, benchmark_path, db_root, output_dir, questions_chunk, start_index=0):
+def gpu_worker(
+    gpu_id, benchmark_path, db_root, output_dir, questions_chunk, start_index=0
+):
     """
     Worker function to run benchmark on a specific GPU.
     Must be at module level (not nested) for multiprocessing pickling.
@@ -1401,7 +1655,7 @@ def gpu_worker(gpu_id, benchmark_path, db_root, output_dir, questions_chunk, sta
     import os
 
     # Set CUDA visible device BEFORE any torch operations
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
     # Clear GPU memory
     torch.cuda.empty_cache()
@@ -1415,7 +1669,7 @@ def gpu_worker(gpu_id, benchmark_path, db_root, output_dir, questions_chunk, sta
         limit=None,  # Already chunked
         gpu_id=0,  # In worker, we see only 1 GPU (set by CUDA_VISIBLE_DEVICES)
         questions_chunk=questions_chunk,
-        start_index=start_index  # Pass start index for result tracking
+        start_index=start_index,  # Pass start index for result tracking
     )
 
 
@@ -1425,7 +1679,7 @@ def run_multi_gpu_benchmark(
     output_dir: str,
     start: int = None,
     end: int = None,
-    num_gpus: int = 4
+    num_gpus: int = 4,
 ):
     """
     Run benchmark across multiple GPUs using data parallelism.
@@ -1442,7 +1696,7 @@ def run_multi_gpu_benchmark(
     import multiprocessing as mp
 
     # CRITICAL: Use 'spawn' method for CUDA compatibility
-    mp.set_start_method('spawn', force=True)
+    mp.set_start_method("spawn", force=True)
 
     # Setup GPUs
     gpu_ids = setup_multi_gpu(num_gpus)
@@ -1487,7 +1741,9 @@ def run_multi_gpu_benchmark(
             chunk_start_indices.append(0)
 
     for i, chunk in enumerate(question_chunks):
-        print(f"  GPU {i}: {len(chunk)} questions (start index: {chunk_start_indices[i]})")
+        print(
+            f"  GPU {i}: {len(chunk)} questions (start index: {chunk_start_indices[i]})"
+        )
 
     # Create output directories for each GPU
     gpu_output_dirs = []
@@ -1505,7 +1761,14 @@ def run_multi_gpu_benchmark(
         if question_chunks[i]:  # Only start if there are questions
             p = mp.Process(
                 target=gpu_worker,
-                args=(gpu_ids[i], benchmark_path, db_root, gpu_output_dirs[i], question_chunks[i], chunk_start_indices[i])
+                args=(
+                    gpu_ids[i],
+                    benchmark_path,
+                    db_root,
+                    gpu_output_dirs[i],
+                    question_chunks[i],
+                    chunk_start_indices[i],
+                ),
             )
             p.start()
             processes.append(p)
@@ -1523,9 +1786,9 @@ def run_multi_gpu_benchmark(
         "simple": [],
         "moderate": [],
         "challenging": [],
-        "unknown": []
+        "unknown": [],
     }
-    
+
     for i, gpu_output_dir in enumerate(gpu_output_dirs):
         results_file = os.path.join(gpu_output_dir, "benchmark_results.json")
         if os.path.exists(results_file):
@@ -1533,7 +1796,7 @@ def run_multi_gpu_benchmark(
                 gpu_results = json.load(f)
                 all_results.extend(gpu_results)
                 print(f"  GPU {i}: {len(gpu_results)} results")
-    
+
     # Save merged results
     merged_output_file = os.path.join(output_dir, "benchmark_results_merged.json")
     with open(merged_output_file, "w") as f:
@@ -1541,21 +1804,29 @@ def run_multi_gpu_benchmark(
 
     # Generate detailed report
     generate_detailed_report(all_results, output_dir)
-    
+
     print(f"\nMerged results saved to: {merged_output_file}")
     print(f"Speedup: ~{num_gpus}x faster than single GPU")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--benchmark", required=True, help="Path to mini_dev_sqlite.json")
+    parser.add_argument(
+        "--benchmark", required=True, help="Path to mini_dev_sqlite.json"
+    )
     parser.add_argument("--db_root", required=True, help="Path to databases dir")
     parser.add_argument("--output", default="outputs/benchmark_results")
-    parser.add_argument("--start", type=int, default=None, help="Start index (inclusive, for resuming)")
-    parser.add_argument("--end", type=int, default=None, help="End index (exclusive, for limiting)")
+    parser.add_argument(
+        "--start", type=int, default=None, help="Start index (inclusive, for resuming)"
+    )
+    parser.add_argument(
+        "--end", type=int, default=None, help="End index (exclusive, for limiting)"
+    )
     parser.add_argument("--multi-gpu", action="store_true", help="Use multiple GPUs")
     parser.add_argument("--num-gpus", type=int, default=4, help="Number of GPUs to use")
-    parser.add_argument("--gpu-id", type=int, default=None, help="Specific GPU ID for single-GPU mode")
+    parser.add_argument(
+        "--gpu-id", type=int, default=None, help="Specific GPU ID for single-GPU mode"
+    )
 
     args = parser.parse_args()
 
@@ -1566,15 +1837,10 @@ if __name__ == "__main__":
             args.output,
             args.start,
             args.end,
-            args.num_gpus
+            args.num_gpus,
         )
     else:
         # Single GPU mode with start/end support
         run_benchmark_single_gpu(
-            args.benchmark,
-            args.db_root,
-            args.output,
-            args.start,
-            args.end,
-            args.gpu_id
+            args.benchmark, args.db_root, args.output, args.start, args.end, args.gpu_id
         )
