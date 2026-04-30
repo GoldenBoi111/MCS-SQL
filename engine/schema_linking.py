@@ -387,7 +387,7 @@ class TransformersLLMClient:
                 )
 
                 temp = temperature if temperature is not None else self.temperature
-                kwargs = {"max_tokens": self.max_new_tokens}
+                kwargs = {"max_new_tokens": self.max_new_tokens}
                 if temp > 0:
                     kwargs["temperature"] = temp
 

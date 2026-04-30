@@ -255,7 +255,7 @@ def run_spider_benchmark(
     start_index: int = 0,
     faiss_index: Optional[str] = None,
     faiss_index_masked: Optional[str] = None,
-    generation_batch_size: int = 4,
+    generation_batch_size: int = 8,
     retrieval_k: int = 20,
 ):
     os.makedirs(output_dir, exist_ok=True)
@@ -747,7 +747,7 @@ def run_spider_benchmark(
             selection_responses = generate_batch_in_chunks(
                 llm_client=llm_client,
                 prompts=selection_prompts,
-                batch_size=max(1, min(generation_batch_size, 4)),
+                batch_size=max(1, generation_batch_size),
                 error_logger=error_logger,
                 phase="SQL_SELECTION",
                 question_id=q_idx,
@@ -848,7 +848,7 @@ def run_spider_benchmark_single_gpu(
     gpu_id: int = None,
     faiss_index: Optional[str] = None,
     faiss_index_masked: Optional[str] = None,
-    generation_batch_size: int = 4,
+    generation_batch_size: int = 8,
     retrieval_k: int = 20,
 ):
     questions = load_benchmark(benchmark_path)
@@ -898,7 +898,7 @@ def gpu_worker(
     start_index=0,
     faiss_index=None,
     faiss_index_masked=None,
-    generation_batch_size=4,
+    generation_batch_size=8,
     retrieval_k=20,
 ):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -933,6 +933,30 @@ def run_multi_gpu_benchmark(
     retrieval_k: int = 20,
 ):
     import multiprocessing as mp
+    config = Config()
+    model_name = config.LLM_MODEL_NAME.lower()
+    is_120b = "120b" in model_name
+
+    if is_120b:
+        print(
+            "\n[WARN] 120B model detected. "
+            "This runner uses one process per GPU for data parallelism, "
+            "but 120B needs all GPUs visible to a single process for model parallelism."
+        )
+        print("[WARN] Falling back to single-process model-parallel execution.")
+        run_spider_benchmark_single_gpu(
+            benchmark_path=benchmark_path,
+            db_root=db_root,
+            output_dir=output_dir,
+            start=start,
+            end=end,
+            gpu_id=None,
+            faiss_index=faiss_index,
+            faiss_index_masked=faiss_index_masked,
+            generation_batch_size=generation_batch_size,
+            retrieval_k=retrieval_k,
+        )
+        return
 
     mp.set_start_method("spawn", force=True)
 
@@ -1045,7 +1069,7 @@ def main():
     parser.add_argument(
         "--generation-batch-size",
         type=int,
-        default=4,
+        default=8,
         help="Max prompts per model batch during generation",
     )
     parser.add_argument(
