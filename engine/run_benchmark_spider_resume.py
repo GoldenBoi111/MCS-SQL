@@ -40,6 +40,7 @@ class GPUPlan:
     remaining_count: int
     question_ids: List[int]
     resume_from: Optional[int]
+    stop_source: str
 
 
 def load_questions_with_ids(benchmark_path: str) -> List[Dict]:
@@ -86,10 +87,59 @@ def collect_completed_question_ids(progress_dir: Optional[str]) -> Set[int]:
     return completed_qids
 
 
+def discover_gpu_resume_starts(resume_dir: Optional[str]) -> List[Tuple[int, int]]:
+    """
+    Look inside the resume directory and infer each GPU's start question index
+    from the first completed question in that GPU's output file.
+    """
+    if not resume_dir:
+        return []
+
+    resume_path = Path(resume_dir)
+    if not resume_path.exists():
+        return []
+
+    discovered: List[Tuple[int, int]] = []
+    for gpu_dir in sorted([path for path in resume_path.iterdir() if path.is_dir() and path.name.startswith("gpu_")]):
+        try:
+            gpu_id = int(gpu_dir.name.split("_", 1)[1])
+        except Exception:
+            continue
+
+        results_file = None
+        for filename in ["all_outputs.json", "benchmark_results.json", "benchmark_results_merged.json"]:
+            candidate = gpu_dir / filename
+            if candidate.exists():
+                results_file = candidate
+                break
+
+        if results_file is None:
+            continue
+
+        try:
+            with open(results_file, "r", encoding="utf-8") as file_handle:
+                data = json.load(file_handle)
+            if not isinstance(data, list):
+                continue
+            question_ids = [
+                int(row["question_id"])
+                for row in data
+                if isinstance(row, dict) and row.get("question_id") is not None
+            ]
+            if question_ids:
+                discovered.append((gpu_id, min(question_ids)))
+        except Exception:
+            continue
+
+    discovered.sort(key=lambda item: item[1])
+    return discovered
+
+
 def build_gpu_ranges(
     total_questions: int,
     gpu_ids: List[int],
     gpu_starts: Optional[List[int]] = None,
+    resume_dir: Optional[str] = None,
 ) -> List[Tuple[int, int, int]]:
     if not gpu_ids:
         raise ValueError("At least one GPU ID is required")
@@ -104,10 +154,19 @@ def build_gpu_ranges(
         chunk_size = (total_questions + len(gpu_ids) - 1) // len(gpu_ids)
         gpu_starts = [i * chunk_size for i in range(len(gpu_ids))]
 
+    discovered_resume_starts = discover_gpu_resume_starts(resume_dir)
+    discovered_start_values = [start for _, start in discovered_resume_starts]
+
     ranges = []
     for index, gpu_id in enumerate(gpu_ids):
         start_index = max(0, gpu_starts[index])
-        end_index = gpu_starts[index + 1] if index + 1 < len(gpu_starts) else total_questions
+
+        if discovered_start_values:
+            end_candidates = [value for value in discovered_start_values if value > start_index]
+            end_index = min(end_candidates) if end_candidates else total_questions
+        else:
+            end_index = gpu_starts[index + 1] if index + 1 < len(gpu_starts) else total_questions
+
         end_index = min(end_index, total_questions)
         start_index = min(start_index, total_questions)
         if end_index < start_index:
@@ -120,14 +179,30 @@ def build_gpu_plans(
     questions: List[Dict],
     gpu_ranges: List[Tuple[int, int, int]],
     completed_qids: Set[int],
+    resume_dir: Optional[str] = None,
 ) -> List[GPUPlan]:
     plans: List[GPUPlan] = []
+    discovered_resume_starts = discover_gpu_resume_starts(resume_dir)
+    discovered_start_values = [start for _, start in discovered_resume_starts]
 
     for gpu_id, start_index, end_index in gpu_ranges:
         chunk = questions[start_index:end_index]
         remaining = [question for question in chunk if int(question["question_id"]) not in completed_qids]
         question_ids = [int(question["question_id"]) for question in chunk]
         resume_from = int(remaining[0]["question_id"]) if remaining else None
+        stop_source = "dataset_end"
+        if discovered_start_values:
+            end_candidates = [value for value in discovered_start_values if value > start_index]
+            if end_candidates:
+                stop_value = min(end_candidates)
+                for other_gpu_id, other_start in discovered_resume_starts:
+                    if other_start == stop_value:
+                        stop_source = f"resume_dir gpu_{other_gpu_id} start={other_start}"
+                        break
+            else:
+                stop_source = "dataset_end"
+        elif end_index < len(questions):
+            stop_source = f"explicit_start_next_gpu={end_index}"
         plans.append(
             GPUPlan(
                 gpu_id=gpu_id,
@@ -137,6 +212,7 @@ def build_gpu_plans(
                 remaining_count=len(remaining),
                 question_ids=question_ids,
                 resume_from=resume_from,
+                stop_source=stop_source,
             )
         )
 
@@ -164,6 +240,7 @@ def print_plans(plans: List[GPUPlan], dry_run: bool) -> None:
             f"  completed={plan.completed_count}, remaining={plan.remaining_count}, "
             f"resume_from={plan.resume_from}"
         )
+        print(f"  stops_at={plan.end_index} via {plan.stop_source}")
     print(f"{'=' * 80}\n")
 
 
@@ -287,8 +364,8 @@ def run_resumable_spider_benchmark(
     elif resume:
         print("Resume requested, but no prior outputs were found.")
 
-    gpu_ranges = build_gpu_ranges(total_questions, gpu_ids, gpu_starts)
-    plans = build_gpu_plans(questions, gpu_ranges, completed_qids)
+    gpu_ranges = build_gpu_ranges(total_questions, gpu_ids, gpu_starts, resume_dir if resume else None)
+    plans = build_gpu_plans(questions, gpu_ranges, completed_qids, resume_dir=resume_dir)
 
     print_plans(plans, dry_run=dry_run)
 
@@ -370,6 +447,11 @@ def main() -> None:
     )
     parser.add_argument("--resume", action="store_true", help="Resume from prior outputs")
     parser.add_argument("--dry-run", action="store_true", help="Print plan and exit")
+    parser.add_argument(
+        "--auto-stop-from-resume",
+        action="store_true",
+        help="Infer GPU stop boundaries from the resume directory",
+    )
     parser.add_argument("--faiss-index", default=None, help="Path to Spider standard FAISS index")
     parser.add_argument(
         "--faiss-index-masked",
@@ -391,7 +473,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    resume_dir = args.resume_dir or (args.output if args.resume else None)
+    resume_dir = args.resume_dir or (args.output if (args.resume or args.auto_stop_from_resume) else None)
     run_resumable_spider_benchmark(
         benchmark_path=args.benchmark,
         db_root=args.db_root,
@@ -399,7 +481,7 @@ def main() -> None:
         gpu_ids=args.gpu_ids,
         gpu_starts=args.gpu_starts,
         resume_dir=resume_dir,
-        resume=args.resume,
+        resume=args.resume or args.auto_stop_from_resume,
         dry_run=args.dry_run,
         faiss_index=args.faiss_index,
         faiss_index_masked=args.faiss_index_masked,
