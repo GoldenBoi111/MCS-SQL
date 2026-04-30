@@ -155,11 +155,15 @@ def build_gpu_ranges(
         gpu_starts = [i * chunk_size for i in range(len(gpu_ids))]
 
     discovered_resume_starts = discover_gpu_resume_starts(resume_dir)
-    discovered_start_values = [start for _, start in discovered_resume_starts]
+    discovered_start_by_gpu = {gpu_id: start for gpu_id, start in discovered_resume_starts}
+    discovered_start_values = sorted(start for _, start in discovered_resume_starts)
 
     ranges = []
     for index, gpu_id in enumerate(gpu_ids):
-        start_index = max(0, gpu_starts[index])
+        if resume_dir and gpu_id in discovered_start_by_gpu:
+            start_index = discovered_start_by_gpu[gpu_id]
+        else:
+            start_index = max(0, gpu_starts[index])
 
         if discovered_start_values:
             end_candidates = [value for value in discovered_start_values if value > start_index]
@@ -183,7 +187,8 @@ def build_gpu_plans(
 ) -> List[GPUPlan]:
     plans: List[GPUPlan] = []
     discovered_resume_starts = discover_gpu_resume_starts(resume_dir)
-    discovered_start_values = [start for _, start in discovered_resume_starts]
+    discovered_start_by_gpu = {gpu_id: start for gpu_id, start in discovered_resume_starts}
+    discovered_start_values = sorted(start for _, start in discovered_resume_starts)
 
     for gpu_id, start_index, end_index in gpu_ranges:
         chunk = questions[start_index:end_index]
