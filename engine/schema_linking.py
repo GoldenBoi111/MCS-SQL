@@ -968,6 +968,28 @@ class SchemaLinker:
         combined_reasoning = "\n\n".join(all_reasoning)
         return unique_items, combined_reasoning
 
+    def _fallback_schema_items(
+        self,
+        task_type: str,
+        schema: Dict[str, List[str]],
+        selected_tables: Optional[List[str]] = None,
+        max_tables: int = 2,
+        max_columns: int = 3,
+    ) -> List[str]:
+        """
+        Provide a conservative schema-aware fallback when the model returns
+        an empty list. This is better than silently propagating blanks.
+        """
+        if task_type == "table":
+            return list(schema.keys())[:max_tables]
+
+        fallback_tables = selected_tables or list(schema.keys())[:1]
+        fallback_columns: List[str] = []
+        for table in fallback_tables:
+            for col in schema.get(table, [])[:max_columns]:
+                fallback_columns.append(f"{table}.{col}")
+        return fallback_columns
+
     def link_tables(
         self, schema: Dict[str, List[str]], question: str, evidence: str = ""
     ) -> Tuple[List[str], str]:
@@ -1018,6 +1040,16 @@ class SchemaLinker:
                 results.append(parsed)
 
         tables, reasoning = self.union_results(results, "table")
+        if not tables:
+            tables = self._fallback_schema_items("table", schema)
+            reasoning = (
+                reasoning
+                + ("\n\n" if reasoning else "")
+                + "Fallback applied because the model returned no tables."
+            )
+            print(
+                f"    [WARN] Table linking returned no tables; using fallback: {tables}"
+            )
         print(f"    Table linking complete: selected {len(tables)} tables: {tables}")
         return tables, reasoning
 
@@ -1074,6 +1106,18 @@ class SchemaLinker:
                 results.append(parsed)
 
         columns, reasoning = self.union_results(results, "column")
+        if not columns:
+            columns = self._fallback_schema_items(
+                "column", schema, selected_tables=selected_tables
+            )
+            reasoning = (
+                reasoning
+                + ("\n\n" if reasoning else "")
+                + "Fallback applied because the model returned no columns."
+            )
+            print(
+                f"    [WARN] Column linking returned no columns; using fallback: {columns}"
+            )
         print(f"    Column linking complete: selected {len(columns)} columns")
         return columns, reasoning
 

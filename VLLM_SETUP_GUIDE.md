@@ -142,7 +142,7 @@ VLLM_MAX_MODEL_LEN=8192
 VLLM_API_URL=http://localhost:8000
 
 # vLLM maximum tokens to generate
-VLLM_MAX_TOKENS=512
+VLLM_MAX_TOKENS=2048
 
 # vLLM temperature for sampling
 VLLM_TEMPERATURE=0.3

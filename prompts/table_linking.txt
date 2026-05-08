@@ -9,10 +9,11 @@
 {evidence}
 
 You need to not only select the required tables, but also explain in detail why each table is needed.
+You must return at least one table. Never return an empty `tables` array.
 Your answer should strictly follow the following json format.
 {{
     "reasoning": "", // The reason for choosing each table.
-    "tables": [], // List of selected tables.
+    "tables": ["table_name_1", ...], // List of selected tables, at least one.
 }}
 
 ### Your Answer:

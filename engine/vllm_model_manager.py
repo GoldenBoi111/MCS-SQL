@@ -80,7 +80,7 @@ class vLLMConfig:
     model_name: str
     tensor_parallel_size: int = 1
     max_model_len: int = 8192
-    max_tokens: int = 512
+    max_tokens: int = 2048
     temperature: float = 0.3
     gpu_memory_utilization: float = 0.95
     kv_cache_dtype: str = "auto"
@@ -104,7 +104,7 @@ class vLLMModelManager:
         self,
         model_name: str,
         tensor_parallel_size: int = 4,
-        max_tokens: int = 512,
+        max_tokens: int = 2048,
         temperature: float = 0.3,
         gpu_memory_utilization: float = 0.95,
         max_model_len: int = 8192,
@@ -509,7 +509,7 @@ class vLLMAPIClient:
         self,
         prompt: str,
         model: Optional[str] = None,
-        max_tokens: int = 512,
+        max_tokens: int = 2048,
         temperature: float = 0.3,
         stop_sequences: Optional[List[str]] = None,
     ) -> str:
@@ -527,7 +527,7 @@ class vLLMAPIClient:
         self,
         prompts: List[str],
         model: Optional[str] = None,
-        max_tokens: int = 512,
+        max_tokens: int = 2048,
         temperature: float = 0.3,
     ) -> List[str]:
         """Generate responses for batch of prompts via API."""
@@ -547,7 +547,7 @@ class vLLMAPIClient:
         prompt: str,
         json_schema: Dict[str, Any],
         model: Optional[str] = None,
-        max_tokens: int = 512,
+        max_tokens: int = 2048,
         temperature: float = 0.3,
     ) -> Dict[str, Any]:
         """Generate JSON via API (requires server-side guided decoding support)."""
@@ -571,7 +571,7 @@ class vLLMAPIClient:
 def create_vllm_manager(
     model_name: str = "openai/gpt-oss-120b",
     num_gpus: int = 4,
-    max_tokens: int = 512,
+    max_tokens: int = 2048,
     temperature: float = 0.3,
 ) -> vLLMModelManager:
     """

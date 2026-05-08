@@ -72,7 +72,7 @@ class Config:
 
         # LLM configuration
         self.LLM_DEVICE = os.getenv("LLM_DEVICE", "cuda")
-        self.LLM_MAX_NEW_TOKENS = self._get_int("LLM_MAX_NEW_TOKENS", 512)
+        self.LLM_MAX_NEW_TOKENS = 2048
         self.LLM_TEMPERATURE = self._get_float("LLM_TEMPERATURE", 0.7)
         self.TABLE_LINKING_ITERATIONS = self._get_int("TABLE_LINKING_ITERATIONS", 3)
         self.COLUMN_LINKING_ITERATIONS = self._get_int("COLUMN_LINKING_ITERATIONS", 3)
