@@ -91,10 +91,10 @@ This automatically:
 launch_vllm_server.bat openai/gpt-oss-120b 4 8000
 
 # Or manually
-python -m vllm.entrypoints.api_server \
-    --model openai/gpt-oss-120b \
+vllm serve openai/gpt-oss-120b \
     --tensor-parallel-size 4 \
     --port 8000 \
+    --host 0.0.0.0 \
     --gpu-memory-utilization 0.95 \
     --max-model-len 8192
 ```
@@ -361,17 +361,18 @@ LLM_MODEL_NAME=/path/to/local/model
 For models larger than 4 GPUs can handle:
 ```bash
 # Node 1
-python -m vllm.entrypoints.api_server \
-    --model openai/gpt-oss-120b \
+vllm serve openai/gpt-oss-120b \
     --tensor-parallel-size 4 \
     --port 8000 \
+    --host 0.0.0.0 \
     --distributed-executor-backend mp
 
 # Node 2 (same command, different port)
-python -m vllm.entrypoints.api_server \
-    --model openai/gpt-oss-120b \
+vllm serve openai/gpt-oss-120b \
     --tensor-parallel-size 4 \
-    --port 8001
+    --port 8001 \
+    --host 0.0.0.0 \
+    --distributed-executor-backend mp
 ```
 
 ### Custom Sampling Parameters
@@ -461,9 +462,9 @@ params = SamplingParams(
 ### Optimal Settings for 120B on 4×A100
 
 ```bash
-python -m vllm.entrypoints.api_server \
-    --model openai/gpt-oss-120b \
+vllm serve openai/gpt-oss-120b \
     --tensor-parallel-size 4 \
+    --host 0.0.0.0 \
     --gpu-memory-utilization 0.95 \
     --max-model-len 8192 \
     --max-num-batched-tokens 32768 \

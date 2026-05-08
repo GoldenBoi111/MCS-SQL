@@ -50,10 +50,9 @@ echo Press Ctrl+C to stop
 echo.
 
 REM Set environment variables for better performance
-set VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+REM (Add only variables recognized by your vLLM version)
 
-python -m vllm.entrypoints.api_server ^
-    --model %MODEL_NAME% ^
+vllm serve %MODEL_NAME% ^
     --tensor-parallel-size %TENSOR_PARALLEL_SIZE% ^
     --port %PORT% ^
     --host 0.0.0.0 ^

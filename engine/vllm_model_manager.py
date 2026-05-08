@@ -470,8 +470,7 @@ class vLLMAPIClient:
     Alternative: Connect to a running vLLM API server.
     
     Use this when vLLM server is running separately:
-        python -m vllm.entrypoints.api_server \\
-            --model openai/gpt-oss-120b \\
+        vllm serve openai/gpt-oss-120b \\
             --tensor-parallel-size 4 \\
             --port 8000
     

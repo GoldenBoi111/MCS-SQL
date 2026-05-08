@@ -46,18 +46,13 @@ if [ "$GPU_COUNT" -lt "$TENSOR_PARALLEL_SIZE" ]; then
     exit 1
 fi
 
-# Set environment variables for better performance
-export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
-export VLLM_TEST_FORCE_OPENSOURCE=1
-
 # Launch vLLM server
 echo ""
 echo "Starting vLLM API server..."
 echo "Press Ctrl+C to stop"
 echo ""
 
-python -m vllm.entrypoints.api_server \
-    --model "$MODEL_NAME" \
+vllm serve "$MODEL_NAME" \
     --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
     --port "$PORT" \
     --host "0.0.0.0" \
@@ -70,8 +65,7 @@ python -m vllm.entrypoints.api_server \
     --trust-remote-code
 
 # Alternative: Run in background
-# python -m vllm.entrypoints.api_server \
-#     --model "$MODEL_NAME" \
+# vllm serve "$MODEL_NAME" \
 #     --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
 #     --port "$PORT" \
 #     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
