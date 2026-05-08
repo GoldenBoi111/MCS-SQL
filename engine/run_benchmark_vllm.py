@@ -73,11 +73,10 @@ logger = logging.getLogger(__name__)
 
 # vLLM support
 try:
-    from vllm_model_manager import vLLMModelManager, vLLMAPIClient, create_vllm_manager, is_vllm_available
-    VLLM_AVAILABLE = is_vllm_available()
+    from vllm_model_manager import vLLMModelManager, vLLMAPIClient, create_vllm_manager
+    VLLM_AVAILABLE = True
 except ImportError:
     VLLM_AVAILABLE = False
-    is_vllm_available = lambda: False
     print("Warning: vLLM not installed. Install with: pip install vllm")
 
 
@@ -1409,16 +1408,6 @@ if __name__ == "__main__":
         print("Local vLLM import is not required for generation.")
     else:
         print("\nUsing local vLLM mode (tensor parallel on this machine).")
-
-    if not args.vllm_url and not VLLM_AVAILABLE:
-        print("\nError: vLLM is not installed and no API URL provided.")
-        print("Install with: pip install vllm")
-        print("\nOr start a vLLM server:")
-        print("  python -m vllm.entrypoints.api_server \\")
-        print("      --model openai/gpt-oss-120b \\")
-        print("      --tensor-parallel-size 4 \\")
-        print("      --port 8000")
-        exit(1)
 
     if args.multi_gpu:
         run_multi_gpu_benchmark(
