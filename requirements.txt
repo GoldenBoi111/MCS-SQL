@@ -12,11 +12,10 @@ torch>=2.0.0
 outlines>=0.0.40
 
 # vLLM (for high-throughput generation with 120B+ models)
-# Install separately due to CUDA requirements:
+# Install separately so pip does not try to build CUDA extensions from source:
 #   pip install vllm
-# Or with CUDA 12.1:
-#   pip install vllm --extra-index-url https://download.pytorch.org/whl/cu121
-vllm>=0.4.0
+# or, for newer builds:
+#   pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
 
 # OpenAI client for vLLM API connection
 openai>=1.0.0

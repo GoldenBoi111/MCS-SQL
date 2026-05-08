@@ -73,10 +73,11 @@ logger = logging.getLogger(__name__)
 
 # vLLM support
 try:
-    from vllm_model_manager import vLLMModelManager, vLLMAPIClient, create_vllm_manager
-    VLLM_AVAILABLE = True
+    from vllm_model_manager import vLLMModelManager, vLLMAPIClient, create_vllm_manager, is_vllm_available
+    VLLM_AVAILABLE = is_vllm_available()
 except ImportError:
     VLLM_AVAILABLE = False
+    is_vllm_available = lambda: False
     print("Warning: vLLM not installed. Install with: pip install vllm")
 
 
@@ -309,6 +310,10 @@ def run_vllm_benchmark(
         vllm_client = vllm_model
     
     config = Config()
+    print("\nResolved configuration:")
+    print(f"  FAISS_INDEX: {config.FAISS_INDEX}")
+    print(f"  FAISS_INDEX_MASKED: {config.FAISS_INDEX_MASKED}")
+    print(f"  PROMPTS_DIR: {config.PROMPTS_DIR}")
     
     # Setup schema linker with vLLM
     # Note: Schema linker needs JSON support, so we use the vLLM client directly
@@ -1399,7 +1404,13 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    if not VLLM_AVAILABLE and not args.vllm_url:
+    if args.vllm_url:
+        print(f"\nUsing vLLM API mode: {args.vllm_url}")
+        print("Local vLLM import is not required for generation.")
+    else:
+        print("\nUsing local vLLM mode (tensor parallel on this machine).")
+
+    if not args.vllm_url and not VLLM_AVAILABLE:
         print("\nError: vLLM is not installed and no API URL provided.")
         print("Install with: pip install vllm")
         print("\nOr start a vLLM server:")

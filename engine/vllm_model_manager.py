@@ -31,19 +31,47 @@ from typing import List, Dict, Any, Optional, Union
 from dataclasses import dataclass
 import time
 
-try:
-    from vllm import LLM, SamplingParams
-    # vLLM v0.12.0+ uses StructuredOutputsParams (replaces guided_json)
+LLM = None
+SamplingParams = None
+StructuredOutputsParams = None
+VLLM_AVAILABLE = False
+HAS_STRUCTURED_OUTPUTS = False
+
+
+def _ensure_vllm_imported() -> None:
+    """Import vLLM lazily so API-only usage does not require local vLLM."""
+    global LLM, SamplingParams, StructuredOutputsParams, VLLM_AVAILABLE, HAS_STRUCTURED_OUTPUTS
+
+    if VLLM_AVAILABLE and LLM is not None and SamplingParams is not None:
+        return
+
     try:
-        from vllm.sampling_params import StructuredOutputsParams
-        HAS_STRUCTURED_OUTPUTS = True
-    except ImportError:
+        from vllm import LLM as _LLM, SamplingParams as _SamplingParams
+        try:
+            from vllm.sampling_params import StructuredOutputsParams as _StructuredOutputsParams
+            has_structured_outputs = True
+        except ImportError:
+            _StructuredOutputsParams = None
+            has_structured_outputs = False
+
+        LLM = _LLM
+        SamplingParams = _SamplingParams
+        StructuredOutputsParams = _StructuredOutputsParams
+        HAS_STRUCTURED_OUTPUTS = has_structured_outputs
+        VLLM_AVAILABLE = True
+    except ImportError as exc:
+        VLLM_AVAILABLE = False
         HAS_STRUCTURED_OUTPUTS = False
-    VLLM_AVAILABLE = True
-except ImportError:
-    VLLM_AVAILABLE = False
-    HAS_STRUCTURED_OUTPUTS = False
-    print("Warning: vLLM not installed. Install with: pip install vllm")
+        raise ImportError("vLLM is not installed. Install with: pip install vllm") from exc
+
+
+def is_vllm_available() -> bool:
+    """Return True if vLLM can be imported in the current environment."""
+    try:
+        _ensure_vllm_imported()
+        return True
+    except ImportError:
+        return False
 
 
 @dataclass
@@ -92,8 +120,7 @@ class vLLMModelManager:
             gpu_memory_utilization: Fraction of GPU memory to use (0.95 for 95%)
             max_model_len: Maximum sequence length (prompt + output)
         """
-        if not VLLM_AVAILABLE:
-            raise ImportError("vLLM is not installed. Install with: pip install vllm")
+        _ensure_vllm_imported()
         
         self.config = vLLMConfig(
             model_name=model_name,
