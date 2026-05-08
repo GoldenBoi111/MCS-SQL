@@ -26,6 +26,16 @@ python engine/run_benchmark_vllm.py \
     --tensor-parallel-size 4
 ```
 
+## Resume If Interrupted
+
+```bash
+python engine/run_benchmark_vllm_resume.py \
+    --benchmark minidev/MINIDEV/mini_dev_sqlite.json \
+    --db_root minidev/MINIDEV/dev_databases/ \
+    --output outputs/benchmark_vllm_120b \
+    --tensor-parallel-size 4
+```
+
 ## Test First
 
 ```bash

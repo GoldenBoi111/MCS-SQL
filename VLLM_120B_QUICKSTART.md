@@ -42,6 +42,20 @@ python engine/run_benchmark_vllm.py \
     --tensor-parallel-size 4
 ```
 
+## Auto Resume
+
+If a run is interrupted, use the resume wrapper to continue from the first missing question:
+
+```bash
+python engine/run_benchmark_vllm_resume.py \
+    --benchmark minidev/MINIDEV/mini_dev_sqlite.json \
+    --db_root minidev/MINIDEV/dev_databases/ \
+    --output outputs/benchmark_vllm_120b \
+    --tensor-parallel-size 4
+```
+
+The script inspects `outputs/benchmark_vllm_120b` and resumes automatically from the next missing index.
+
 ---
 
 ## Resume After Interruption
