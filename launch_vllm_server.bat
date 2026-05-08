@@ -9,7 +9,6 @@ REM   launch_vllm_server.bat [model_name] [tensor_parallel_size] [port]
 REM
 REM Examples:
 REM   launch_vllm_server.bat openai/gpt-oss-120b 4 8000
-REM   launch_vllm_server.bat openai/gpt-oss-20b 1 8000
 
 setlocal enabledelayedexpansion
 

@@ -333,26 +333,26 @@ python engine/run_benchmark.py \
 #   - outputs/benchmark_full/detailed_report.json
 ```
 
-### Multi-GPU (4×A100 with GPT-OSS 20B)
+### Multi-GPU (4xA100 with GPT-OSS 120B)
 
 ```bash
-python engine/run_benchmark.py \
+python engine/run_benchmark_vllm.py \
     --benchmark minidev/MINIDEV/mini_dev_sqlite.json \
     --db_root minidev/MINIDEV/dev_databases/ \
-    --output outputs/benchmark_gpt_oss_20b \
-    --multi-gpu \
-    --num-gpus 4
+    --output outputs/benchmark_vllm_120b \
+    --tensor-parallel-size 4
+```
 
-# Expected runtime: ~12-17 hours for 500 questions
-# Expected VRAM: ~42 GB per GPU
+Expected runtime depends on prompt length and system load, but the 120B vLLM path is the intended 4-GPU flow here.
 
+```text
 # Outputs:
-#   - outputs/benchmark_gpt_oss_20b/gpu_0/benchmark_results.json
-#   - outputs/benchmark_gpt_oss_20b/gpu_1/benchmark_results.json
-#   - outputs/benchmark_gpt_oss_20b/gpu_2/benchmark_results.json
-#   - outputs/benchmark_gpt_oss_20b/gpu_3/benchmark_results.json
-#   - outputs/benchmark_gpt_oss_20b/benchmark_results_merged.json
-#   - outputs/benchmark_gpt_oss_20b/detailed_report.json
+#   - outputs/benchmark_vllm_120b/gpu_0/benchmark_results.json
+#   - outputs/benchmark_vllm_120b/gpu_1/benchmark_results.json
+#   - outputs/benchmark_vllm_120b/gpu_2/benchmark_results.json
+#   - outputs/benchmark_vllm_120b/gpu_3/benchmark_results.json
+#   - outputs/benchmark_vllm_120b/benchmark_results_merged.json
+#   - outputs/benchmark_vllm_120b/detailed_report.json
 ```
 
 ---

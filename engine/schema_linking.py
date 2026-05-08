@@ -112,11 +112,7 @@ class TransformersLLMClient:
                 model_kwargs["load_in_8bit"] = True
                 print("  Using 8-bit quantization (bitsandbytes)")
             else:
-                if (
-                    "gpt-oss" in model_name.lower()
-                    or "20b" in model_name.lower()
-                    or "120b" in model_name.lower()
-                ):
+                if "gpt-oss" in model_name.lower() or "120b" in model_name.lower():
                     model_kwargs["torch_dtype"] = torch.bfloat16
                     print("  Using bfloat16")
                 else:

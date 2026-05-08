@@ -22,7 +22,7 @@ Run this to get timing for extrapolation:
 python engine/test_vllm_single.py \
     --benchmark minidev/MINIDEV/mini_dev_sqlite.json \
     --db_root minidev/MINIDEV/dev_databases/ \
-    --output outputs/test_vllm_single \
+    --output outputs/test_vllm_120b \
     --tensor-parallel-size 4
 ```
 

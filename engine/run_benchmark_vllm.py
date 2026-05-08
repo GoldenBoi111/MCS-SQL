@@ -1385,7 +1385,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MCS-SQL Benchmark with vLLM")
     parser.add_argument("--benchmark", required=True, help="Path to mini_dev_sqlite.json")
     parser.add_argument("--db_root", required=True, help="Path to databases directory")
-    parser.add_argument("--output", default="outputs/benchmark_vllm")
+    parser.add_argument("--output", default="outputs/benchmark_vllm_120b")
     parser.add_argument("--tensor-parallel-size", type=int, default=4,
                         help="Number of GPUs for tensor parallelism (default: 4)")
     parser.add_argument("--vllm-url", type=str, default=None,

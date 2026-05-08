@@ -4,7 +4,7 @@ from torch.profiler import profile, ProfilerActivity
 import time
 
 # You can change this if you want to test Qwen or another model!
-MODEL_NAME = "openai/gpt-oss-20b"
+MODEL_NAME = "openai/gpt-oss-120b"
 
 print(f"Loading {MODEL_NAME} in bfloat16...")
 # This forces the remote code just like your pipeline does

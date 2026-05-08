@@ -7,7 +7,7 @@ Usage:
     python engine/test_vllm_single.py \
         --benchmark minidev/MINIDEV/mini_dev_sqlite.json \
         --db_root minidev/MINIDEV/dev_databases/ \
-        --output outputs/test_vllm_single
+        --output outputs/test_vllm_120b
 """
 
 import argparse
@@ -24,7 +24,7 @@ def main():
     parser = argparse.ArgumentParser(description="Test vLLM 120B with single question")
     parser.add_argument("--benchmark", required=True, help="Path to mini_dev_sqlite.json")
     parser.add_argument("--db_root", required=True, help="Path to databases directory")
-    parser.add_argument("--output", default="outputs/test_vllm_single")
+    parser.add_argument("--output", default="outputs/test_vllm_120b")
     parser.add_argument("--tensor-parallel-size", type=int, default=4,
                         help="Number of GPUs for tensor parallelism")
     

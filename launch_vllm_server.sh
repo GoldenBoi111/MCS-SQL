@@ -9,7 +9,6 @@
 #
 # Examples:
 #   ./launch_vllm_server.sh openai/gpt-oss-120b 4 8000
-#   ./launch_vllm_server.sh openai/gpt-oss-20b 1 8000
 
 # Default configuration
 MODEL_NAME=${1:-"openai/gpt-oss-120b"}
