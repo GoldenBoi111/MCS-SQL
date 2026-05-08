@@ -482,6 +482,7 @@ class vLLMAPIClient:
         self,
         base_url: str = "http://localhost:8000",
         api_key: str = "vllm",
+        model_name: str = "openai/gpt-oss-120b",
     ):
         """
         Initialize vLLM API client.
@@ -489,6 +490,7 @@ class vLLMAPIClient:
         Args:
             base_url: vLLM API server URL
             api_key: API key (default: "vllm")
+            model_name: Served model name to send to the OpenAI-compatible API
         """
         try:
             from openai import OpenAI
@@ -500,19 +502,20 @@ class vLLMAPIClient:
             raise ImportError("OpenAI client not installed. Install with: pip install openai")
         
         self.base_url = base_url
+        self.model_name = model_name
         print(f"Connected to vLLM API server at {base_url}")
     
     def generate(
         self,
         prompt: str,
-        model: str = "default",
+        model: Optional[str] = None,
         max_tokens: int = 512,
         temperature: float = 0.3,
         stop_sequences: Optional[List[str]] = None,
     ) -> str:
         """Generate response via API."""
         response = self.client.completions.create(
-            model=model,
+            model=model or self.model_name,
             prompt=prompt,
             max_tokens=max_tokens,
             temperature=temperature,
@@ -523,7 +526,7 @@ class vLLMAPIClient:
     def generate_batch(
         self,
         prompts: List[str],
-        model: str = "default",
+        model: Optional[str] = None,
         max_tokens: int = 512,
         temperature: float = 0.3,
     ) -> List[str]:
@@ -531,7 +534,7 @@ class vLLMAPIClient:
         results = []
         for prompt in prompts:
             response = self.client.completions.create(
-                model=model,
+                model=model or self.model_name,
                 prompt=prompt,
                 max_tokens=max_tokens,
                 temperature=temperature,
@@ -543,7 +546,7 @@ class vLLMAPIClient:
         self,
         prompt: str,
         json_schema: Dict[str, Any],
-        model: str = "default",
+        model: Optional[str] = None,
         max_tokens: int = 512,
         temperature: float = 0.3,
     ) -> Dict[str, Any]:
@@ -551,7 +554,7 @@ class vLLMAPIClient:
         # Note: API server may not support guided_json directly
         # Use server-side --guided-json option or parse client-side
         response = self.client.completions.create(
-            model=model,
+            model=model or self.model_name,
             prompt=prompt,
             max_tokens=max_tokens,
             temperature=temperature,

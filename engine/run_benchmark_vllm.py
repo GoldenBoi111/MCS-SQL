@@ -292,7 +292,11 @@ def run_vllm_benchmark(
     if vllm_model is None:
         if vllm_url:
             print(f"Connecting to vLLM API server at {vllm_url}...")
-            vllm_client = vLLMAPIClient(base_url=vllm_url)
+            config = Config()
+            vllm_client = vLLMAPIClient(
+                base_url=vllm_url,
+                model_name=config.LLM_MODEL_NAME,
+            )
         else:
             if not VLLM_AVAILABLE:
                 raise ImportError("vLLM is not installed. Install with: pip install vllm")
@@ -1293,22 +1297,24 @@ def run_multi_gpu_benchmark(
 
     # Load all questions
     questions = load_benchmark(benchmark_path)
+    original_start = start if start and start > 0 else 0
+    original_end = end if end and end > 0 else None
 
     # Apply start/end indices for resuming or partial runs
-    if start and start > 0:
-        print(f"Resuming from question index {start}...")
-        questions = questions[start:]
-    if end and end > 0:
-        print(f"Limiting to question index {end} (exclusive)...")
-        questions = questions[:end]
+    if original_start > 0:
+        print(f"Resuming from question index {original_start}...")
+        questions = questions[original_start:]
+    if original_end is not None:
+        print(f"Limiting to question index {original_end} (exclusive)...")
+        questions = questions[: max(0, original_end - original_start)]
 
     # Build output subdirectory from start/end to keep runs separate
     if start or end:
         subdir_parts = []
-        if start and start > 0:
-            subdir_parts.append(f"start_{start}")
-        if end and end > 0:
-            subdir_parts.append(f"end_{end}")
+        if original_start > 0:
+            subdir_parts.append(f"start_{original_start}")
+        if original_end is not None:
+            subdir_parts.append(f"end_{original_end}")
         output_dir = os.path.join(output_dir, "_".join(subdir_parts))
 
     print(f"\nTotal questions: {len(questions)}")
