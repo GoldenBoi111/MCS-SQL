@@ -550,17 +550,25 @@ class vLLMAPIClient:
         max_tokens: int = 2048,
         temperature: float = 0.3,
     ) -> Dict[str, Any]:
-        """Generate JSON via API (requires server-side guided decoding support)."""
-        # Note: API server may not support guided_json directly
-        # Use server-side --guided-json option or parse client-side
-        response = self.client.completions.create(
+        """Generate JSON via the OpenAI-compatible chat API with guided JSON."""
+        response = self.client.chat.completions.create(
             model=model or self.model_name,
-            prompt=prompt,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert SQL developer. Return only valid JSON "
+                        "that matches the provided schema."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
             max_tokens=max_tokens,
             temperature=temperature,
+            extra_body={"guided_json": json_schema},
         )
-        
-        text = response.choices[0].text
+
+        text = response.choices[0].message.content or ""
         try:
             return json.loads(text)
         except:
